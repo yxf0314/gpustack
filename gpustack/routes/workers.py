@@ -1,5 +1,8 @@
+import uuid
+
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
+from sqlalchemy.exc import IntegrityError
 
 from gpustack.api.exceptions import (
     AlreadyExistsException,
@@ -61,13 +64,25 @@ async def create_worker(session: SessionDep, worker_in: WorkerCreate):
     if existing:
         raise AlreadyExistsException(message=f"worker f{worker_in.name} already exists")
 
-    try:
-        worker_in.compute_state()
-        worker = await Worker.create(session, worker_in)
-    except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to create worker: {e}")
+    retry_cnt, max_cnt = 0, 2
+    while retry_cnt < max_cnt:
+        try:
+            worker_in.compute_state()
+            worker = await Worker.create(session, worker_in)
+            return worker
+        except IntegrityError as ie:
+            if "ix_workers_name" in str(ie.orig):
+                worker_in.name = f"{worker_in.name}-{worker_in.ip}:{worker_in.port}-{uuid.uuid4().hex}"
+                retry_cnt += 1
+                continue
+            else:
+                raise InternalServerErrorException(
+                    message=f"Failed to create worker: {ie}"
+                )
+        except Exception as e:
+            raise InternalServerErrorException(message=f"Failed to create worker: {e}")
 
-    return worker
+    return None
 
 
 @router.put("/{id}", response_model=WorkerPublic)

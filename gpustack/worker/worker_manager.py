@@ -111,7 +111,8 @@ class WorkerManager:
         )
 
         try:
-            self._clientset.workers.create(worker)
+            worker = self._clientset.workers.create(worker)
+            self._worker_name = worker.name
         except AlreadyExistsException:
             logger.debug(f"Worker {worker.name} already exists, skip registration.")
             return
