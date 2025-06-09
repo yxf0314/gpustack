@@ -80,6 +80,7 @@ class WorkerStatusCollector:
         self._inject_computed_filesystem_usage(status)
         self._inject_allocated_resource(status)
 
+        worker_uuid = ""
         if self._worker_manager is not None:
             server_processes = self._worker_manager.get_rpc_servers()
             rps_server = {}
@@ -88,6 +89,7 @@ class WorkerStatusCollector:
                     pid=process.process.pid, port=process.port, gpu_index=gpu_index
                 )
             status.rpc_servers = rps_server
+            worker_uuid = self._worker_manager.get_worker_uuid()
 
         state = WorkerStateEnum.NOT_READY if initial else WorkerStateEnum.READY
 
@@ -98,6 +100,7 @@ class WorkerStatusCollector:
             port=self._worker_port,
             state=state,
             status=status,
+            worker_uuid=worker_uuid,
         )
 
     def _inject_unified_memory(self, status: WorkerStatus):

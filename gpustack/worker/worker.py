@@ -2,6 +2,7 @@ import asyncio
 import os
 import logging
 import socket
+import subprocess
 from typing import Optional
 
 from fastapi import FastAPI
@@ -69,6 +70,8 @@ class Worker:
             self._config.worker_ip = self._worker_ip
             self._enable_worker_ip_monitor = True
 
+        self._worker_uuid = self._get_worker_uuid()
+
         self._worker_name = cfg.worker_name
         if self._worker_name is None:
             self._worker_name = self._get_worker_name()
@@ -84,6 +87,7 @@ class Worker:
             system_reserved=self._system_reserved,
             clientset=self._clientset,
             cfg=cfg,
+            worker_uuid=self._worker_uuid,
         )
         self._exporter = MetricExporter(
             worker_ip=self._worker_ip,
@@ -108,6 +112,41 @@ class Worker:
                 file.write(worker_name)
 
         return worker_name
+
+    def _get_worker_uuid(self):
+        worker_uuid = ""
+        worker_uuid_path = os.path.join(self._config.data_dir, "worker_uuid")
+        if os.path.exists(worker_uuid_path):
+            with open(worker_uuid_path, "r") as file:
+                worker_uuid = file.read().strip()
+        else:
+            sys_name = platform.system()
+            if sys_name == "windows":
+                worker_uuid = (
+                    subprocess.run(
+                        "wmic csproduct get uuid", capture_output=True, text=True
+                    )
+                    .stdout.split('\n')[1]
+                    .strip()
+                )
+            elif sys_name == "linux":
+                worker_uuid = subprocess.run(
+                    "sudo dmidecode -s system-uuid",
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+            elif sys_name == "darwin":
+                worker_uuid = subprocess.run(
+                    "ioreg -rd1 -c IOPlatformExpertDevice | grep IOPlatformUUID",
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.split('"')[-2]
+            with open(worker_uuid_path, "w") as file:
+                file.write(worker_uuid)
+
+        return worker_uuid
 
     @tenacity.retry(
         stop=tenacity.stop_after_attempt(5),
