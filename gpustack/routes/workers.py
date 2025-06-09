@@ -1,4 +1,4 @@
-import uuid
+import random
 
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
@@ -60,9 +60,24 @@ async def get_worker(session: SessionDep, id: int):
 
 @router.post("", response_model=WorkerPublic)
 async def create_worker(session: SessionDep, worker_in: WorkerCreate):
+    uuid_existing = (
+        await Worker.one_by_field(session, "worker_uuid", worker_in.worker_uuid)
+        if worker_in.worker_uuid
+        else ""
+    )
+    if uuid_existing:
+        return uuid_existing
+
     existing = await Worker.one_by_field(session, "name", worker_in.name)
     if existing:
-        raise AlreadyExistsException(message=f"worker f{worker_in.name} already exists")
+        if existing.worker_uuid == worker_in.worker_uuid:
+            raise AlreadyExistsException(
+                message=f"worker f{worker_in.name} already exists"
+            )
+        if not existing.worker_uuid and worker_in.worker_uuid:
+            existing.worker_uuid = worker_in.worker_uuid
+            await existing.update(session)
+            return existing
 
     retry_cnt, max_cnt = 0, 2
     while retry_cnt < max_cnt:
@@ -72,7 +87,7 @@ async def create_worker(session: SessionDep, worker_in: WorkerCreate):
             return worker
         except IntegrityError as ie:
             if "ix_workers_name" in str(ie.orig):
-                worker_in.name = f"{worker_in.name}-{worker_in.ip}:{worker_in.port}-{uuid.uuid4().hex}"
+                worker_in.name = f"{worker_in.name}-{random.randint(10000, 99999)}"
                 retry_cnt += 1
                 continue
             else:

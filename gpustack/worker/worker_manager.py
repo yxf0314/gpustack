@@ -36,6 +36,7 @@ class WorkerManager:
         system_reserved: SystemReserved,
         clientset: ClientSet,
         cfg: Config,
+        worker_uuid: str,
     ):
         self._cfg = cfg
         self._registration_completed = False
@@ -49,6 +50,7 @@ class WorkerManager:
         self._rpc_server_args = cfg.rpc_server_args
         self._gpu_devices = cfg.get_gpu_devices()
         self._system_info = cfg.get_system_info()
+        self._worker_uuid = worker_uuid
 
         os.makedirs(self._rpc_server_log_dir, exist_ok=True)
 
@@ -221,6 +223,9 @@ class WorkerManager:
 
     def get_occupied_ports(self) -> set[int]:
         return {server.port for server in self._rpc_servers.values()}
+
+    def get_worker_uuid(self) -> str:
+        return self._worker_uuid
 
 
 def ensure_builtin_labels(worker: Worker):
