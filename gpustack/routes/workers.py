@@ -60,6 +60,14 @@ async def get_worker(session: SessionDep, id: int):
 
 @router.post("", response_model=WorkerPublic)
 async def create_worker(session: SessionDep, worker_in: WorkerCreate):
+    uuid_existing = (
+        await Worker.one_by_field(session, "worker_uuid", worker_in.worker_uuid)
+        if worker_in.worker_uuid
+        else ""
+    )
+    if uuid_existing:
+        return uuid_existing
+
     existing = await Worker.one_by_field(session, "name", worker_in.name)
     if existing:
         if existing.worker_uuid == worker_in.worker_uuid:

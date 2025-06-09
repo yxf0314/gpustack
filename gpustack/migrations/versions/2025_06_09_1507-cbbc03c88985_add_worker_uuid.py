@@ -25,6 +25,7 @@ def upgrade() -> None:
     with op.batch_alter_table('workers', schema=None) as batch_op:
         batch_op.add_column(sa.Column('worker_uuid', sa.String(length=255), nullable=False, server_default=''))
 
+    op.create_index('ix_workers_worker_uuid', 'workers', ['worker_uuid'], unique=False)
     # ### end Alembic commands ###
 
 
@@ -33,4 +34,5 @@ def downgrade() -> None:
     with op.batch_alter_table('workers', schema=None) as batch_op:
         batch_op.drop_column('worker_uuid')
 
+    op.drop_index('ix_workers_worker_uuid', table_name='workers')
     # ### end Alembic commands ###
