@@ -112,17 +112,39 @@ class WorkerManager:
             f"Registering worker: {worker.name}",
         )
 
+        same_name_worker = self._get_worker_by_name()
+        existing = False
+
+        if same_name_worker:
+            worker.id = same_name_worker.id
+            existing = self._is_valid_existing_worker(same_name_worker)
+
         try:
-            worker = self._clientset.workers.create(worker)
-            self._worker_name = worker.name
-        except AlreadyExistsException:
-            logger.debug(f"Worker {worker.name} already exists, skip registration.")
-            return
+            if existing:
+                self._clientset.workers.update(id=worker.id, model_update=worker)
+            else:
+                self._clientset.workers.create(worker)
         except Exception as e:
             logger.error(f"Failed to register worker: {e}")
-            raise e
+            raise
 
         logger.info(f"Worker {worker.name} registered.")
+
+    def _get_worker_by_name(self):
+        _worker = None
+        result = self._clientset.workers.list(params={"name": self._worker_name})
+        if result and len(result.items) > 0 and result.items[0] is not None:
+            _worker = result.items[0]
+        return _worker
+
+    def _is_valid_existing_worker(self, existing_worker: Worker) -> bool:
+        if not existing_worker.worker_uuid and self._worker_uuid:
+            return True
+        if existing_worker.worker_uuid == self._worker_uuid:
+            return True
+        raise AlreadyExistsException(
+            f"Worker {existing_worker.name} already exists with different uuid"
+        )
 
     @time_decorator
     def _initialize_worker(self):

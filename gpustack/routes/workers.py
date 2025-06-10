@@ -1,8 +1,5 @@
-import random
-
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
-from sqlalchemy.exc import IntegrityError
 
 from gpustack.api.exceptions import (
     AlreadyExistsException,
@@ -60,44 +57,16 @@ async def get_worker(session: SessionDep, id: int):
 
 @router.post("", response_model=WorkerPublic)
 async def create_worker(session: SessionDep, worker_in: WorkerCreate):
-    uuid_existing = (
-        await Worker.one_by_field(session, "worker_uuid", worker_in.worker_uuid)
-        if worker_in.worker_uuid
-        else ""
-    )
-    if uuid_existing:
-        return uuid_existing
-
     existing = await Worker.one_by_field(session, "name", worker_in.name)
     if existing:
-        if existing.worker_uuid == worker_in.worker_uuid:
-            raise AlreadyExistsException(
-                message=f"worker f{worker_in.name} already exists"
-            )
-        if not existing.worker_uuid and worker_in.worker_uuid:
-            existing.worker_uuid = worker_in.worker_uuid
-            await existing.update(session)
-            return existing
+        raise AlreadyExistsException(message=f"worker f{worker_in.name} already exists")
 
-    retry_cnt, max_cnt = 0, 2
-    while retry_cnt < max_cnt:
-        try:
-            worker_in.compute_state()
-            worker = await Worker.create(session, worker_in)
-            return worker
-        except IntegrityError as ie:
-            if "ix_workers_name" in str(ie.orig):
-                worker_in.name = f"{worker_in.name}-{random.randint(10000, 99999)}"
-                retry_cnt += 1
-                continue
-            else:
-                raise InternalServerErrorException(
-                    message=f"Failed to create worker: {ie}"
-                )
-        except Exception as e:
-            raise InternalServerErrorException(message=f"Failed to create worker: {e}")
-
-    return None
+    try:
+        worker_in.compute_state()
+        worker = await Worker.create(session, worker_in)
+        return worker
+    except Exception as e:
+        raise InternalServerErrorException(message=f"Failed to create worker: {e}")
 
 
 @router.put("/{id}", response_model=WorkerPublic)
