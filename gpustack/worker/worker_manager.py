@@ -1,3 +1,4 @@
+import random
 from datetime import datetime, timezone
 import multiprocessing
 import os
@@ -6,9 +7,6 @@ from typing import Dict
 
 import psutil
 
-from gpustack.api.exceptions import (
-    AlreadyExistsException,
-)
 
 from gpustack.client import ClientSet
 from gpustack.config.config import Config
@@ -112,16 +110,12 @@ class WorkerManager:
             f"Registering worker: {worker.name}",
         )
 
-        same_name_worker = self._get_worker_by_name()
-        existing = False
-
-        if same_name_worker:
-            worker.id = same_name_worker.id
-            existing = self._is_valid_existing_worker(same_name_worker)
+        same_worker, existing = self._check_same_worker()
+        worker.name = self._worker_name
 
         try:
             if existing:
-                self._clientset.workers.update(id=worker.id, model_update=worker)
+                self._clientset.workers.update(id=same_worker.id, model_update=worker)
             else:
                 self._clientset.workers.create(worker)
         except Exception as e:
@@ -130,21 +124,36 @@ class WorkerManager:
 
         logger.info(f"Worker {worker.name} registered.")
 
-    def _get_worker_by_name(self):
-        _worker = None
+    def _check_same_worker(self) -> tuple[Worker | None, bool]:
+        same_name_worker, same_uuid_worker = None, None
         result = self._clientset.workers.list(params={"name": self._worker_name})
         if result and len(result.items) > 0 and result.items[0] is not None:
-            _worker = result.items[0]
-        return _worker
+            same_name_worker = result.items[0]
+        uuid_result = self._clientset.workers.list(params={"uuid": self._worker_uuid})
+        if (
+            uuid_result
+            and len(uuid_result.items) > 0
+            and uuid_result.items[0] is not None
+        ):
+            same_uuid_worker = uuid_result.items[0]
 
-    def _is_valid_existing_worker(self, existing_worker: Worker) -> bool:
-        if not existing_worker.worker_uuid and self._worker_uuid:
-            return True
-        if existing_worker.worker_uuid == self._worker_uuid:
-            return True
-        raise AlreadyExistsException(
-            f"Worker {existing_worker.name} already exists with different uuid"
-        )
+        if same_name_worker:
+            if not same_name_worker.worker_uuid and self._worker_uuid:
+                return same_name_worker, True
+            if (
+                not same_uuid_worker
+                and same_name_worker.worker_uuid != self._worker_uuid
+            ):
+                self._worker_name = (
+                    f"{self._worker_name}-{random.randint(10000, 99999)}"
+                )
+                return same_name_worker, False
+        if same_uuid_worker:
+            self._worker_name = (
+                same_uuid_worker.name if same_name_worker else self._worker_name
+            )
+            return same_uuid_worker, True
+        return None, False
 
     @time_decorator
     def _initialize_worker(self):

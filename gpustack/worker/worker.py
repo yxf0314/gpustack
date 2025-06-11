@@ -119,7 +119,7 @@ class Worker:
             with open(worker_uuid_path, "r") as file:
                 worker_uuid = file.read().strip()
         else:
-            worker_uuid = str(uuid.uuid1())
+            worker_uuid = str(uuid.uuid4())
             with open(worker_uuid_path, "w") as file:
                 file.write(worker_uuid)
 
