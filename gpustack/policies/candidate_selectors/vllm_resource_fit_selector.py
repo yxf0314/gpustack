@@ -429,7 +429,10 @@ class VLLMResourceFitSelector(ScheduleCandidatesSelector):
                         continue
 
                 vram_claim = (
-                    int(gpu.memory.total * self._gpu_memory_utilization)
+                    max(
+                        int(gpu.memory.total * self._gpu_memory_utilization),
+                        int(self._vram_claim),
+                    )
                     if self._gpu_memory_utilization > 0  # LLMs
                     else int(self._vram_claim)  # non LLMs
                 )
