@@ -416,7 +416,11 @@ class VLLMResourceFitSelector(ScheduleCandidatesSelector):
                     continue
 
                 overcommit = False
-                exceeds_vram = self._vram_claim > allocatable_vram
+                exceeds_vram = (
+                    self._vram_claim > allocatable_vram * self._gpu_memory_utilization
+                    if self._gpu_memory_utilization > 0  # LLMs
+                    else self._vram_claim > allocatable_vram  # non LLMs
+                )
                 exceeds_memory_utilization = (
                     self._gpu_memory_utilization > 0
                     and allocatable_gpu_memory_utilization
