@@ -7,7 +7,7 @@ from typing import Dict
 
 import psutil
 
-
+from gpustack.api.exceptions import AlreadyExistsException
 from gpustack.client import ClientSet
 from gpustack.config.config import Config
 from gpustack.detectors.custom.custom import Custom
@@ -49,6 +49,8 @@ class WorkerManager:
         self._gpu_devices = cfg.get_gpu_devices()
         self._system_info = cfg.get_system_info()
         self._worker_uuid = worker_uuid
+
+        self._worker_name_from_config = cfg.worker_name is not None
 
         os.makedirs(self._rpc_server_log_dir, exist_ok=True)
 
@@ -125,34 +127,45 @@ class WorkerManager:
         logger.info(f"Worker {worker.name} registered.")
 
     def _check_same_worker(self) -> tuple[Worker | None, bool]:
-        same_name_worker, same_uuid_worker = None, None
-        result = self._clientset.workers.list(params={"name": self._worker_name})
-        if result and len(result.items) > 0 and result.items[0] is not None:
-            same_name_worker = result.items[0]
-        uuid_result = self._clientset.workers.list(params={"uuid": self._worker_uuid})
-        if (
-            uuid_result
-            and len(uuid_result.items) > 0
-            and uuid_result.items[0] is not None
-        ):
-            same_uuid_worker = uuid_result.items[0]
+        def _get_worker(params: dict) -> Worker | None:
+            result = self._clientset.workers.list(params=params)
+            return result.items[0] if result and result.items else None
 
-        if same_name_worker:
-            if not same_name_worker.worker_uuid and self._worker_uuid:
-                return same_name_worker, True
-            if (
-                not same_uuid_worker
-                and same_name_worker.worker_uuid != self._worker_uuid
-            ):
-                self._worker_name = (
-                    f"{self._worker_name}-{random.randint(10000, 99999)}"
-                )
-                return same_name_worker, False
-        if same_uuid_worker:
-            self._worker_name = (
-                same_uuid_worker.name if same_name_worker else self._worker_name
+        def _generate_new_name() -> str:
+            new_name = f"{self._worker_name}-{random.randint(10000, 99999)}"
+            logger.info(
+                f"Worker name {self._worker_name} already exists, renaming to {new_name}"
             )
+            return new_name
+
+        same_name_worker = _get_worker({"name": self._worker_name})
+        same_uuid_worker = _get_worker({"uuid": self._worker_uuid})
+
+        if not same_name_worker:
+            return same_uuid_worker, same_uuid_worker is not None
+
+        # Some old workers might not have a worker_uuid set.
+        if not same_name_worker.worker_uuid and self._worker_uuid:
+            return same_name_worker, True
+
+        # If the worker name is from config, and it was already registered, we cannot change it.
+        if self._worker_name_from_config:
+            raise AlreadyExistsException("Please use a different worker name.")
+
+        # If the worker name already exists but has a different UUID, generate a new name
+        if not same_uuid_worker and same_name_worker.worker_uuid != self._worker_uuid:
+            self._worker_name = _generate_new_name()
+            return same_name_worker, False
+
+        # If both UUID and name exist, generate a new name and update the same_uuid_worker
+        if same_uuid_worker and same_name_worker:
+            # UUID worker has a name that starts with the same name as the name worker, should not generate again
+            if same_uuid_worker.name.startswith(f"{same_name_worker.name}-"):
+                self._worker_name = same_uuid_worker.name
+            else:
+                self._worker_name = _generate_new_name()
             return same_uuid_worker, True
+
         return None, False
 
     @time_decorator
