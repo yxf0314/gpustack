@@ -309,7 +309,6 @@ def setup_start_cmd(subparsers: argparse._SubParsersAction):
         "--enable-hf-xet",
         action=OptionalBoolAction,
         help="Enable using Hugging Face Xet to download model files.",
-        default=False,
     )
     group.add_argument(
         "--enable-cors",
