@@ -8,13 +8,11 @@ import time
 from typing import Dict, Tuple
 from multiprocessing import Manager, cpu_count
 
-from huggingface_hub.constants import HF_XET_CACHE
 
 from gpustack.config.config import Config
 from gpustack.logging import setup_logging
 from gpustack.schemas.model_files import ModelFile, ModelFileUpdate, ModelFileStateEnum
 from gpustack.client import ClientSet
-from gpustack.schemas.models import SourceEnum
 from gpustack.server.bus import Event, EventType
 from gpustack.utils.file import delete_path
 from gpustack.worker import downloaders
@@ -107,12 +105,6 @@ class ModelFileManager:
                 paths = chain.from_iterable(
                     glob.glob(p) if '*' in p else [p] for p in model_file.resolved_paths
                 )
-                if (
-                    model_file.source == SourceEnum.HUGGING_FACE
-                    and self._config.clean_hf_xet
-                ):
-                    logger.info("Deleted huggingface xet cache")
-                    delete_path(HF_XET_CACHE)
                 for path in paths:
                     delete_path(path)
 
