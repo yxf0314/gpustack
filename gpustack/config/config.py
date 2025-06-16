@@ -132,6 +132,7 @@ class Config(BaseSettings):
     tools_download_base_url: Optional[str] = None
     rpc_server_args: Optional[List[str]] = None
     enable_hf_transfer: bool = False
+    enable_hf_xet: bool = False
 
     def __init__(self, **values):
         super().__init__(**values)
