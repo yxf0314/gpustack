@@ -349,7 +349,7 @@ def run(args: argparse.Namespace):
         setup_logging(cfg.debug)
         debug_env_info()
         set_third_party_env(cfg=cfg)
-        set_ulimit(1)
+        set_ulimit()
         multiprocessing.set_start_method('spawn')
 
         logger.info(f"GPUStack version: {__version__} ({__git_commit__})")
