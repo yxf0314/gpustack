@@ -102,8 +102,12 @@ class ModelFileManager:
                 logger.info(
                     f"Cancelled download for deleted model: {model_file.readable_source}(id: {model_file.id})"
                 )
+                # Make sure to clean it up
                 if model_file.cleanup_on_delete:
                     await self._delete_model_file(model_file)
+
+        elif not entry and model_file.cleanup_on_delete:
+            await self._delete_model_file(model_file)
 
     async def get_hf_file_metadata(self, model_file: ModelFile, filename: str):
         token = self._config.huggingface_token
@@ -119,9 +123,7 @@ class ModelFileManager:
         )
         return metadata
 
-    async def _get_incomplete_model_files(
-        self, model_file: ModelFile, local_dir: Path, filename_pattern: str
-    ) -> set:
+    async def _get_incomplete_model_files(self, model_file: ModelFile) -> set:
         """
         Finds cached files of models being downloaded.
         1.For models from Hugging Face, their .incomplete filenames are encoded. The process requires:
@@ -133,6 +135,15 @@ class ModelFileManager:
         paths_to_delete = set()
         try:
             if model_file.source == SourceEnum.HUGGING_FACE:
+                path = os.path.join(
+                    self._config.cache_dir,
+                    SourceEnum.HUGGING_FACE,
+                    model_file.huggingface_repo_id,
+                    model_file.huggingface_filename,
+                )
+                path_obj = Path(str(path))
+                filename_pattern = path_obj.name
+                local_dir = path_obj.parent
                 download_paths = get_local_download_paths(local_dir, filename_pattern)
                 cache_dir = download_paths.lock_path.parent
 
@@ -155,8 +166,18 @@ class ModelFileManager:
                     paths_to_delete.add(item_path_str)
 
             elif model_file.source == SourceEnum.MODEL_SCOPE:
+                path = os.path.join(
+                    self._config.cache_dir,
+                    SourceEnum.MODEL_SCOPE,
+                    model_file.model_scope_model_id,
+                    model_file.model_scope_file_path,
+                )
+                path_obj = Path(str(path))
+                filename_pattern = path_obj.name
+                local_dir = path_obj.parent
                 for delete_file in await asyncio.to_thread(
-                    glob.glob, str(local_dir / f"{TEMPORARY_FOLDER_NAME}/{filename}")
+                    glob.glob,
+                    str(local_dir / f"{TEMPORARY_FOLDER_NAME}/{filename_pattern}"),
                 ):
                     paths_to_delete.add(delete_file)
 
@@ -168,14 +189,11 @@ class ModelFileManager:
 
         return paths_to_delete
 
-    async def _delete_incomplete_model_files(self, model_file: ModelFile, path: str):
-        path_obj = Path(path)
-        filename_pattern = path_obj.name
-        local_dir = path_obj.parent
+    async def _delete_incomplete_model_files(self, model_file: ModelFile):
+        if model_file.state != ModelFileStateEnum.DOWNLOADING:
+            return
 
-        paths_to_delete = await self._get_incomplete_model_files(
-            model_file, local_dir, filename_pattern
-        )
+        paths_to_delete = await self._get_incomplete_model_files(model_file)
         for delete_file in paths_to_delete:
             logger.info(f"Attempting to delete incomplete file: {delete_file}")
             await asyncio.to_thread(delete_path, delete_file)
@@ -189,10 +207,7 @@ class ModelFileManager:
                 for path in paths:
                     delete_path(path)
 
-            local_dir = os.path.join(
-                self._config.cache_dir, model_file.source, model_file.readable_source
-            )
-            await self._delete_incomplete_model_files(model_file, local_dir)
+            await self._delete_incomplete_model_files(model_file)
             logger.info(
                 f"Deleted model file {model_file.readable_source}(id: {model_file.id})"
             )
