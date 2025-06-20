@@ -193,7 +193,17 @@ class ModelFileManager:
         if model_file.state != ModelFileStateEnum.DOWNLOADING:
             return
 
-        paths_to_delete = await self._get_incomplete_model_files(model_file)
+        # If the model is not in GGUF format, directly delete the entire directory
+        if not model_file.model_scope_file_path and not model_file.huggingface_filename:
+            path = os.path.join(
+                self._config.cache_dir,
+                model_file.source,
+                model_file.model_scope_model_id or model_file.huggingface_repo_id,
+            )
+            paths_to_delete = [path]
+        else:
+            paths_to_delete = await self._get_incomplete_model_files(model_file)
+
         for delete_file in paths_to_delete:
             logger.info(f"Attempting to delete incomplete file: {delete_file}")
             await asyncio.to_thread(delete_path, delete_file)
