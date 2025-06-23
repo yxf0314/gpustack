@@ -14,7 +14,6 @@ from gpustack.policies.utils import (
     get_worker_model_instances,
 )
 from gpustack.schemas.models import (
-    BackendEnum,
     CategoryEnum,
     ComputedResourceClaim,
     Model,
@@ -213,10 +212,6 @@ class VLLMResourceFitSelector(ScheduleCandidatesSelector):
             self._gpu_memory_utilization = 0
 
         self._gpu_memory_utilization_parameter_name = "gpu-memory-utilization"
-        if model.backend == BackendEnum.ASCEND_MINDIE:
-            # Ascend MindIE uses a different parameter name
-            self._gpu_memory_utilization_parameter_name = "npu-memory-fraction"
-
         gmu = find_parameter(
             model.backend_parameters, [self._gpu_memory_utilization_parameter_name]
         )
@@ -296,7 +291,7 @@ class VLLMResourceFitSelector(ScheduleCandidatesSelector):
     def _add_message(self, message: str):
         self._messages.append(message)
 
-    def get_messages(self) -> str:
+    def get_messages(self) -> List[str]:
         return self._messages
 
     async def _get_worker_allocatable_resource(self, worker: Worker):
