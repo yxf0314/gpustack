@@ -15,6 +15,7 @@ from huggingface_hub.file_download import get_hf_file_metadata, hf_hub_url
 import huggingface_hub.constants
 from huggingface_hub.utils import build_hf_headers
 
+from gpustack.api.exceptions import NotFoundException
 from gpustack.config.config import Config
 from gpustack.logging import setup_logging
 from gpustack.schemas.model_files import ModelFile, ModelFileUpdate, ModelFileStateEnum
@@ -95,18 +96,19 @@ class ModelFileManager:
             cancel_flag.set()
             future.cancel()
             try:
-                await future
-            except asyncio.CancelledError:
+                await asyncio.wrap_future(future)
+            except (asyncio.CancelledError, NotFoundException):
                 pass
+            except Exception as e:
+                logger.error(
+                    f"Error while cancelling download for {model_file.readable_source}(id: {model_file.id}): {e}"
+                )
             finally:
                 logger.info(
                     f"Cancelled download for deleted model: {model_file.readable_source}(id: {model_file.id})"
                 )
-                # Make sure to clean it up
-                if model_file.cleanup_on_delete:
-                    await self._delete_model_file(model_file)
 
-        elif not entry and model_file.cleanup_on_delete:
+        if model_file.cleanup_on_delete:
             await self._delete_model_file(model_file)
 
     async def get_hf_file_metadata(self, model_file: ModelFile, filename: str):
@@ -133,14 +135,20 @@ class ModelFileManager:
         """
         filename = ""
         paths_to_delete = set()
+
         try:
             if model_file.source == SourceEnum.HUGGING_FACE:
                 path = os.path.join(
                     self._config.cache_dir,
                     SourceEnum.HUGGING_FACE,
                     model_file.huggingface_repo_id,
-                    model_file.huggingface_filename,
                 )
+                if model_file.huggingface_filename:
+                    path = os.path.join(path, model_file.huggingface_filename)
+                else:
+                    paths_to_delete.add(path)
+                    return paths_to_delete
+
                 path_obj = Path(str(path))
                 filename_pattern = path_obj.name
                 local_dir = path_obj.parent
@@ -160,6 +168,7 @@ class ModelFileManager:
 
                 # Collect lock files and incomplete files
                 paths_to_delete.add(str(cache_dir / (filename + ".lock")))
+                paths_to_delete.add(str(cache_dir / (filename + ".metadata")))
                 for item_path_str in await asyncio.to_thread(
                     glob.glob, str(cache_dir / f"*.{metadata.etag}.incomplete")
                 ):
@@ -170,8 +179,13 @@ class ModelFileManager:
                     self._config.cache_dir,
                     SourceEnum.MODEL_SCOPE,
                     model_file.model_scope_model_id,
-                    model_file.model_scope_file_path,
                 )
+                if model_file.model_scope_file_path:
+                    path = os.path.join(path, model_file.model_scope_model_id)
+                else:
+                    paths_to_delete.add(path)
+                    return paths_to_delete
+
                 path_obj = Path(str(path))
                 filename_pattern = path_obj.name
                 local_dir = path_obj.parent
@@ -190,19 +204,7 @@ class ModelFileManager:
         return paths_to_delete
 
     async def _delete_incomplete_model_files(self, model_file: ModelFile):
-        if model_file.state != ModelFileStateEnum.DOWNLOADING:
-            return
-
-        # If the model is not in GGUF format, directly delete the entire directory
-        if not model_file.model_scope_file_path and not model_file.huggingface_filename:
-            path = os.path.join(
-                self._config.cache_dir,
-                model_file.source,
-                model_file.model_scope_model_id or model_file.huggingface_repo_id,
-            )
-            paths_to_delete = [path]
-        else:
-            paths_to_delete = await self._get_incomplete_model_files(model_file)
+        paths_to_delete = await self._get_incomplete_model_files(model_file)
 
         for delete_file in paths_to_delete:
             logger.info(f"Attempting to delete incomplete file: {delete_file}")
@@ -219,7 +221,7 @@ class ModelFileManager:
 
             await self._delete_incomplete_model_files(model_file)
             logger.info(
-                f"Deleted model file {model_file.readable_source}(id: {model_file.id})"
+                f"Deleted model file {model_file.readable_source}(id: {model_file.id}) from disk"
             )
         except Exception as e:
             logger.error(
@@ -246,6 +248,10 @@ class ModelFileManager:
         async def _check_completion():
             try:
                 await asyncio.wrap_future(future)
+            except NotFoundException:
+                logger.info(
+                    f"Model file {model_file.readable_source} not found. Maybe it was cancelled."
+                )
             except Exception as e:
                 logger.error(f"Failed to download model file: {e}")
                 await self._update_model_file(
