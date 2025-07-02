@@ -47,6 +47,7 @@ class InferenceServer(ABC):
         clientset: ClientSet,
         mi: ModelInstance,
         cfg: Config,
+        worker_id: int,
     ):
         setup_logging(debug=cfg.debug)
         set_global_config(cfg)
@@ -55,7 +56,7 @@ class InferenceServer(ABC):
             self._clientset = clientset
             self._model_instance = mi
             self._config = cfg
-            self._worker = self._clientset.workers.get(self._model_instance.worker_id)
+            self._worker = self._clientset.workers.get(worker_id)
 
             self.get_model()
 
@@ -94,7 +95,7 @@ class InferenceServer(ABC):
         if event.data["state"] == ModelInstanceStateEnum.ERROR:
             raise ModelInstanceStateError()
         elif event.data["state"] == ModelInstanceStateEnum.STARTING:
-            self._model_path = event.data["resolved_path"]
+            self._model_path = str(Path(event.data["resolved_path"]).absolute())
             return True
 
         return False

@@ -55,7 +55,7 @@ class RPCServer:
         args: Optional[List[str]] = None,
     ):
         command_path = pkg_resources.files(
-            "gpustack.third_party.bin.llama-box"
+            "gpustack.third_party.bin.llama-box.llama-box-default"
         ).joinpath(RPCServer.get_llama_box_rpc_server_command())
 
         arguments = [
@@ -87,7 +87,12 @@ class RPCServer:
         env_name = get_env_name_by_vendor(vendor)
         env = os.environ.copy()
         env[env_name] = str(gpu_index)
-
+        cwd = str(command_path.parent)
+        if platform.system() == "linux":
+            ld_library_path = env.get("LD_LIBRARY_PATH", "")
+            env["LD_LIBRARY_PATH"] = (
+                ":".join([cwd, ld_library_path]) if ld_library_path else cwd
+            )
         try:
             logger.info("Starting llama-box rpc server")
             logger.debug(
@@ -98,6 +103,7 @@ class RPCServer:
                 stdout=sys.stdout,
                 stderr=sys.stderr,
                 env=env,
+                cwd=cwd,
             )
         except Exception as e:
             error_message = f"Failed to run the llama-box rpc server: {e}"

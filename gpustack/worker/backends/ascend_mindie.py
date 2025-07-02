@@ -52,7 +52,7 @@ class AscendMindIEParameters:
     max_prefill_batch_size: int = 50
     prefill_time_ms_per_req: int = 150
     prefill_policy_type: int = 0
-    max_batch_size: int = 200  # FIXME: Calculate this
+    max_batch_size: int = 200
     decode_time_ms_per_req: int = 50
     decode_policy_type: int = 0
     max_preempt_count: int = 0
@@ -80,11 +80,17 @@ class AscendMindIEParameters:
     lookahead_level: int = 4
     lookahead_window: int = 5
     lookahead_guess_set_size: int = 5
+    enable_multi_token_prediction: bool = False
+    multi_token_prediction_tokens: int = 1
     enable_prefix_caching: bool = False
+    local_world_size: int = -1  # store validation input
     world_size: int = -1  # store validation input
-    tensor_parallel_size: int = -1
+    pipeline_parallel_size: int = 1
     data_parallel_size: int = -1
-    enable_expert_parallel: bool = False
+    tensor_parallel_size: int = -1
+    sequence_parallel_size: int = -1
+    moe_expert_parallel_size: int = -1
+    moe_tensor_parallel_size: int = -1
     enable_buffer_response: bool = False
     prefill_expected_time_ms: Optional[int] = None
     decode_expected_time_ms: Optional[int] = None
@@ -354,6 +360,20 @@ class AscendMindIEParameters:
             help="Batch size to start splitting for split fuse.",
         )
         parser.add_argument(
+            "--enable-multi-token-prediction",
+            type=bool,
+            action=argparse.BooleanOptionalAction,
+            help="Enable multi-token prediction. "
+            "Use `--no-enable-multi-token-prediction` to disable explicitly.",
+        )
+        parser.add_argument(
+            "--multi-token-prediction-tokens",
+            type=int,
+            default=self.multi_token_prediction_tokens,
+            help="Number of multi-token prediction tokens. "
+            "This is only effective when `--enable-multi-token-prediction` is enabled.",
+        )
+        parser.add_argument(
             "--enable-prefix-caching",
             type=bool,
             action=argparse.BooleanOptionalAction,
@@ -384,13 +404,12 @@ class AscendMindIEParameters:
             "- `float32`: for FP32. ",
         )
         parser.add_argument(
-            "--tensor-parallel-size",
-            "-tp",
+            "--pipeline-parallel-size",
+            "-pp",
             type=int,
-            default=self.tensor_parallel_size,
+            default=self.pipeline_parallel_size,
             required=False,
-            help="Number of tensor parallel groups."
-            "`-1` means using world size as tensor parallel size, otherwise, must be a power of 2.",
+            help="Number of pipeline parallel groups.",
         )
         parser.add_argument(
             "--data-parallel-size",
@@ -398,16 +417,44 @@ class AscendMindIEParameters:
             type=int,
             default=self.data_parallel_size,
             required=False,
-            help="Number of data parallel groups. "
-            "`-1` means disabling data parallelism, otherwise, must be a power of 2. "
-            "MoE layers will be sharded according to the product of the tensor parallel size and data parallel size.",
+            help="Number of data parallel groups for Attention layers. "
+            "`-1` means disabling data parallelism, otherwise, must be a power of 2.",
         )
         parser.add_argument(
-            "--enable-expert-parallel",
-            type=bool,
-            action=argparse.BooleanOptionalAction,
-            help="Use expert parallelism instead of tensor parallelism for MoE layers. "
-            "Use `--no-enable-expert-parallel` to disable explicitly.",
+            "--tensor-parallel-size",
+            "-tp",
+            type=int,
+            default=self.tensor_parallel_size,
+            required=False,
+            help="Number of tensor parallel groups for Attention layers."
+            "`-1` means using world size as tensor parallel size, otherwise, must be a power of 2.",
+        )
+        parser.add_argument(
+            "--sequence-parallel-size",
+            "-sp",
+            type=int,
+            default=self.sequence_parallel_size,
+            required=False,
+            help="Number of sequence parallel groups for MLP layers. "
+            "`-1` means disabling sequence parallelism, otherwise, must be power of 2.",
+        )
+        parser.add_argument(
+            "--moe-expert-parallel-size",
+            "-moe-ep",
+            type=int,
+            default=self.moe_expert_parallel_size,
+            required=False,
+            help="Number of expert parallel groups. "
+            "`-1` means disabling MoE expert parallelism, otherwise, must be power of 2.",
+        )
+        parser.add_argument(
+            "--moe-tensor-parallel-size",
+            "-moe-tp",
+            type=int,
+            default=self.moe_tensor_parallel_size,
+            required=False,
+            help="Number of tensor parallel groups for MoE MLP layers. "
+            "`-1` and means using world size as MoE tensor parallel size, otherwise, must be power of 2. ",
         )
         parser.add_argument(
             "--rope-scaling",
@@ -438,7 +485,7 @@ class AscendMindIEParameters:
         self._default()
         self._validate()
 
-    def _default(self):
+    def _default(self):  # noqa: C901
         # Model deploy config
         if self.max_input_token_len <= 0:
             self.max_input_token_len = self.max_seq_len
@@ -446,14 +493,44 @@ class AscendMindIEParameters:
         if self.max_preempt_count == 0:
             self.cpu_mem_size = 0
         # Extends or Features
-        # -- Data parallelism
-        if self.tensor_parallel_size <= 0:
-            if self.data_parallel_size > 0:
-                self.tensor_parallel_size = self.world_size // self.data_parallel_size
-            else:
+        # -- Parallelism
+        if self.world_size > 0:
+            if self.tensor_parallel_size < 0:
                 self.tensor_parallel_size = self.world_size
+            if self.moe_tensor_parallel_size < 0:
+                self.moe_tensor_parallel_size = self.world_size
+        else:
+            if self.pipeline_parallel_size > 1:
+                if self.tensor_parallel_size < 0:
+                    self.tensor_parallel_size = 1
+                self.local_world_size = self.tensor_parallel_size
+                self.world_size = (
+                    self.pipeline_parallel_size * self.tensor_parallel_size
+                )
+            else:
+                self.world_size = self.tensor_parallel_size
+                if self.data_parallel_size > 1:
+                    if self.tensor_parallel_size < 0:
+                        self.tensor_parallel_size = 1
+                    if self.local_world_size < 0:
+                        self.local_world_size = self.tensor_parallel_size
+                    self.world_size = (
+                        self.data_parallel_size * self.tensor_parallel_size
+                    )
+                if self.moe_expert_parallel_size > 1:
+                    if self.moe_tensor_parallel_size < 0:
+                        self.moe_tensor_parallel_size = 1
+                    if self.tensor_parallel_size < 0:
+                        self.tensor_parallel_size = self.moe_tensor_parallel_size
+                    if self.local_world_size < 0:
+                        self.local_world_size = self.tensor_parallel_size
+                    self.world_size = (
+                        self.moe_expert_parallel_size * self.moe_tensor_parallel_size
+                    )
+                elif self.moe_tensor_parallel_size < 0:
+                    self.moe_tensor_parallel_size = self.world_size
 
-    def _validate(self):  # noqa: max-complexity=14
+    def _validate(self):  # noqa: C901
         # Server config
         if not (1 <= self.max_link_num <= 1000):
             raise argparse.ArgumentTypeError(
@@ -538,34 +615,101 @@ class AscendMindIEParameters:
                 raise argparse.ArgumentTypeError(
                     "--split-start-batch-size must be in the range [0, --max-batch-size]"
                 )
-        # -- Data parallelism
-        if 0 < self.world_size < self.tensor_parallel_size:
+        # -- Parallelism
+        pp, tp, dp, sp, moe_tp, moe_ep, ws, local_ws = (
+            self.pipeline_parallel_size,
+            self.tensor_parallel_size,
+            self.data_parallel_size,
+            self.sequence_parallel_size,
+            self.moe_tensor_parallel_size,
+            self.moe_expert_parallel_size,
+            self.world_size,
+            self.local_world_size,
+        )
+        if pp <= 0:
             raise argparse.ArgumentTypeError(
-                f"--tensor-parallel-size must be less or equal to world size: {self.world_size}"
+                "--pipeline-parallel-size must be greater than 0"
             )
-        elif self.tensor_parallel_size > 0:
-            if self.tensor_parallel_size & (self.tensor_parallel_size - 1) != 0:
-                raise argparse.ArgumentTypeError(
-                    "--tensor-parallel-size must be the power of 2"
-                )
-        if 0 < self.world_size < self.data_parallel_size:
+        if tp > 0 and tp & (tp - 1) != 0:
             raise argparse.ArgumentTypeError(
-                f"--data-parallel-size must be less or equal to world size: {self.world_size}"
+                "--tensor-parallel-size must be the power of 2"
             )
-        elif self.data_parallel_size > 0:
-            if self.data_parallel_size & (self.data_parallel_size - 1) != 0:
+        if dp > 0 and dp & (dp - 1) != 0:
+            raise argparse.ArgumentTypeError(
+                "--data-parallel-size must be the power of 2"
+            )
+        if sp > 0 and sp & (sp - 1) != 0:
+            raise argparse.ArgumentTypeError(
+                "--sequence-parallel-size must be the power of 2"
+            )
+        if moe_tp > 0 and moe_tp & (moe_tp - 1) != 0:
+            raise argparse.ArgumentTypeError(
+                "--moe-tensor-parallel-size must be the power of 2"
+            )
+        if moe_ep > 0 and moe_ep & (moe_ep - 1) != 0:
+            raise argparse.ArgumentTypeError(
+                "--moe-expert-parallel-size must be the power of 2"
+            )
+        if pp != 1 and dp != -1:
+            raise argparse.ArgumentTypeError(
+                f"--pipeline-parallel-size {pp} "
+                f"and --data-parallel-size {dp} "
+                f"cannot be set at the same time, "
+                f"which means enabling both pipeline and data parallelism."
+            )
+        # Check pp * tp == world size if enable pipeline parallelism
+        if pp > 1:
+            if 0 < ws != pp * tp:
                 raise argparse.ArgumentTypeError(
-                    "--data-parallel-size must be the power of 2"
+                    f"--pipeline-parallel-size {pp} "
+                    f"and --tensor-parallel-size {tp} "
+                    f"must be multiples of world size: {ws}"
                 )
-            elif (
-                0
-                < self.world_size
-                != self.data_parallel_size * self.tensor_parallel_size
-            ):
+        else:
+            # Check tp == world size or tp <= local world size
+            if 0 < local_ws < tp and 0 < ws != tp:
                 raise argparse.ArgumentTypeError(
-                    "--data-parallel-size and --tensor-parallel-size must be "
-                    f"multiples of world size: {self.world_size}"
+                    f"--tensor-parallel-size {tp} "
+                    f"must be less or equal to local world size: {local_ws} "
+                    f"or equal to world size: {ws}"
                 )
+            # Check dp * tp == world size if enable data parallelism
+            if dp > 1:
+                if 0 < ws != dp * tp:
+                    raise argparse.ArgumentTypeError(
+                        f"--data-parallel-size {dp} "
+                        f"and --tensor-parallel-size {tp} "
+                        f"must be multiples of world size: {ws}"
+                    )
+            # Check moe_tp * moe_ep == world size if enable expert parallelism
+            if moe_ep > 1:
+                # Check moe_tp == world size or moe_tp <= local world size
+                if 0 < local_ws < moe_tp and 0 < ws != moe_tp:
+                    raise argparse.ArgumentTypeError(
+                        f"--moe-tensor-parallel-size {moe_tp} "
+                        f"must be less or equal to local world size: {local_ws} "
+                        f"or equal to world size: {ws}"
+                    )
+                if 0 < ws != moe_ep * moe_tp:
+                    raise argparse.ArgumentTypeError(
+                        f"--moe-expert-parallel-size {moe_ep}"
+                        f"and --moe-tensor-parallel-size {moe_tp} "
+                        f"must be multiples of world size: {ws}"
+                    )
+            # Otherwise, check moe_tp == world size
+            else:
+                if 0 < ws != moe_tp:
+                    raise argparse.ArgumentTypeError(
+                        f"--moe-tensor-parallel-size {moe_tp} "
+                        f"must be equal to world size: {ws}"
+                    )
+            # Check sp == tp if enable sequence parallelism
+            if sp > 1:
+                if sp != tp:
+                    raise argparse.ArgumentTypeError(
+                        f"--sequence-parallel-size {sp} "
+                        f"must be equal to --tensor-parallel-size {tp}"
+                    )
         # -- Speculative decoding
         if self.enable_memory_decoding:
             if not (1 <= self.memory_decoding_length <= 16):
@@ -584,6 +728,11 @@ class AscendMindIEParameters:
             if not (1 <= self.lookahead_guess_set_size <= 16):
                 raise argparse.ArgumentTypeError(
                     "--lookahead-guess-set-size must be in the range [1, 16]"
+                )
+        if self.enable_multi_token_prediction:
+            if self.multi_token_prediction_tokens <= 0:
+                raise argparse.ArgumentTypeError(
+                    "--multi-token-prediction-tokens must be greater than 0"
                 )
         # -- Buffer response
         if self.enable_buffer_response:
@@ -628,12 +777,29 @@ class AscendMindIEParameters:
                 raise argparse.ArgumentTypeError(
                     "--rope-scaling is not supported when --enable-lookahead is enabled"
                 )
+        if self.enable_multi_token_prediction:
+            if self.enable_memory_decoding or self.enable_lookahead:
+                raise argparse.ArgumentTypeError(
+                    "--enable-memory-decoding and --enable-lookahead are not supported when --enable-multi-token-prediction is enabled"
+                )
+            if self.enable_split:
+                raise argparse.ArgumentTypeError(
+                    "--enable-split is not supported when --enable-multi-token-prediction is enabled"
+                )
+            if self.rope_scaling:
+                raise argparse.ArgumentTypeError(
+                    "--rope-scaling is not supported when --enable-multi-token-prediction is enabled"
+                )
         if self.enable_prefix_caching:
             if self.rope_scaling:
                 raise argparse.ArgumentTypeError(
                     "--rope-scaling is not supported when --enable-prefix-caching is enabled"
                 )
         if self.data_parallel_size > 1:
+            if self.enable_memory_decoding or self.enable_lookahead:
+                raise argparse.ArgumentTypeError(
+                    "--enable-memory-decoding and --enable-lookahead are not supported when --data-parallel-size > 1"
+                )
             if self.enable_split:
                 raise argparse.ArgumentTypeError(
                     "--enable-split is not supported when --data-parallel-size > 1"
@@ -645,14 +811,14 @@ class AscendMindIEParameters:
 
 
 class AscendMindIEServer(InferenceServer):
-    model_path_mapped: Optional[Path] = None
+    _model_path_mapped: Optional[Path] = None
 
     def __del__(self):
         self.cleanup()
 
     def start(self):
         # Prepare
-        self.model_path_mapped = self._map_model_path()
+        self._model_path_mapped = self._map_model_path()
         # Start
         try:
             self._start()
@@ -664,9 +830,9 @@ class AscendMindIEServer(InferenceServer):
 
     def cleanup(self):
         # Clean up
-        if self.model_path_mapped:
-            shutil.rmtree(self.model_path_mapped)
-        self.model_path_mapped = None
+        if self._model_path_mapped:
+            shutil.rmtree(self._model_path_mapped)
+        self._model_path_mapped = None
 
     def _start(self):  # noqa: max-complexity=15
         """
@@ -679,6 +845,19 @@ class AscendMindIEServer(InferenceServer):
             # There is a risk of failure, but flexible.
             # When error happens, specify a version to avoid this.
             version = "latest"
+
+        minstance = self._model_instance
+        dservers = minstance.distributed_servers
+        subworkers = (
+            dservers.subordinate_workers
+            if dservers and dservers.subordinate_workers
+            else []
+        )
+        subworker_pos = None
+        for i, sw in enumerate(subworkers):
+            if sw.worker_id == self._worker.id:
+                subworker_pos = i
+                break
 
         # Select root path
         root_path = next(
@@ -737,21 +916,44 @@ class AscendMindIEServer(InferenceServer):
         env["MINDIE_CHECK_INPUTFILES_PERMISSION"] = "0"
         # -- Enforce using ATB as backend
         env["MINDIE_LLM_FRAMEWORK_BACKEND"] = "ATB"
-        # -- Asynchronous ATB execution
-        env["ATB_OPERATION_EXECUTE_ASYNC"] = "1"
-        # -- Asynchronous operators emitting
-        env["TASK_QUEUE_ENABLE"] = "1"
         # -- Enforce using 90% of GPU memory
         env["NPU_MEMORY_FRACTION"] = "0.9"
+        # -- Disable OpenMP parallelism, speed up model loading.
+        env["OMP_NUM_THREADS"] = env.pop("OMP_NUM_THREADS", "1")
+        # -- Improve performance.
+        env["MINDIE_ASYNC_SCHEDULING_ENABLE"] = "1"
+        env["TASK_QUEUE_ENABLE"] = env.pop("TASK_QUEUE_ENABLE", "2")
+        env["ATB_OPERATION_EXECUTE_ASYNC"] = "1"
+        env["ATB_LAYER_INTERNAL_TENSOR_REUSE"] = env.pop(
+            "ATB_LAYER_INTERNAL_TENSOR_REUSE", "1"
+        )
+        env["INF_NAN_MODE_ENABLE"] = env.pop("INF_NAN_MODE_ENABLE", "0")
+        env["ATB_LLM_ENABLE_AUTO_TRANSPOSE"] = env.pop(
+            "ATB_LLM_ENABLE_AUTO_TRANSPOSE", "0"
+        )
+        env["ATB_CONVERT_NCHW_TO_ND"] = env.pop("ATB_CONVERT_NCHW_TO_ND", "1")
+        env["ATB_WORKSPACE_MEM_ALLOC_ALG_TYPE"] = env.pop(
+            "ATB_WORKSPACE_MEM_ALLOC_ALG_TYPE", "3"
+        )
+        env["ATB_WORKSPACE_MEM_ALLOC_GLOBAL"] = env.pop(
+            "ATB_WORKSPACE_MEM_ALLOC_GLOBAL", "1"
+        )
+        env["PYTORCH_NPU_ALLOC_CONF"] = env.pop(
+            "PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True"
+        )
         # -- Pop conflict configuration items.
-        env.pop("RANKTABLEFILE", "")  # TODO need for host-across deployment.
-        env.pop("RANK_TABLE_FILE", "")  # TODO need for host-across deployment.
         env.pop("NPU_VISIBLE_DEVICES", "")
         env.pop("NPU-VISIBLE-DEVICES", "")
         env.pop("NPU_DEVICE_IDS", "")
+        env.pop("ASCEND_LAUNCH_BLOCKING", "")
         env.pop("ASCEND_RT_VISIBLE_DEVICES", "")
-        env.pop("MIES_CONTAINER_IP", "")
         env.pop("MIES_CONTAINER_MANAGEMENT_IP", "")
+        env.pop("WORLD_SIZE", "")
+        env.pop("RANKTABLEFILE", "")
+        env.pop("RANK_TABLE_FILE", "")
+        if not subworkers:
+            env.pop("MIES_CONTAINER_IP", "")
+            env.pop("HOST_IP", "")
 
         # - Logging config
         # -- Ascend MindIE
@@ -759,62 +961,79 @@ class AscendMindIEServer(InferenceServer):
         env["MINDIE_LOG_TO_STDOUT"] = "1"
         env["MINDIE_LOG_TO_FILE"] = "0"
         # -- Ascend MindIE Service
-        env["MIES_CERTS_LOG_LEVEL"] = "INFO"
+        env["MIES_CERTS_LOG_LEVEL"] = env.pop("MIES_CERTS_LOG_LEVEL", "INFO")
         env["MIES_CERTS_LOG_TO_STDOUT"] = "1"
         env["MIES_CERTS_LOG_TO_FILE"] = "0"
         # -- Ascend MindIE LLM
-        env["MINDIE_LLM_LOG_LEVEL"] = "WARN"
+        env["MINDIE_LLM_LOG_LEVEL"] = env.pop("MINDIE_LLM_LOG_LEVEL", "WARN")
         env["MINDIE_LLM_LOG_TO_STDOUT"] = "1"
         env["MINDIE_LLM_LOG_TO_FILE"] = "0"
-        env["MINDIE_LLM_PYTHON_LOG_LEVEL"] = "WARN"
+        env["MINDIE_LLM_PYTHON_LOG_LEVEL"] = env.pop(
+            "MINDIE_LLM_PYTHON_LOG_LEVEL", "WARN"
+        )
         env["MINDIE_LLM_PYTHON_LOG_TO_STDOUT"] = "1"
         env["MINDIE_LLM_PYTHON_LOG_TO_FILE"] = "0"
         # -- Ascend MindIE Runtime
-        env["ASCEND_GLOBAL_LOG_LEVEL"] = "3"  # 0: DEBUG, 1: INFO, 2: WARN, 3: ERROR
-        env["ASCEND_SLOG_LEVEL"] = "WARN"
+        env["ASCEND_GLOBAL_LOG_LEVEL"] = env.pop(
+            "ASCEND_GLOBAL_LOG_LEVEL", "3"
+        )  # 0: DEBUG, 1: INFO, 2: WARN, 3: ERROR
+        env["ASCEND_SLOG_LEVEL"] = env.pop("ASCEND_SLOG_LEVEL", "WARN")
         env["ASCEND_SLOG_PRINT_TO_STDOUT"] = "1"
         env["ASCEND_SLOG_PRINT_TO_FILE"] = "0"
-        env["MINDIE_RT_LOG_LEVEL"] = "3"  # 0: DEBUG, 1: INFO, 2: WARN, 3: ERROR
+        env["MINDIE_RT_LOG_LEVEL"] = env.pop(
+            "MINDIE_RT_LOG_LEVEL", "3"
+        )  # 0: DEBUG, 1: INFO, 2: WARN, 3: ERROR
         env["MINDIE_RT_LOG_PRINT_TO_STDOUT"] = "1"
         env["MINDIE_RT_LOG_PRINT_TO_FILE"] = "0"
         # -- Ascend MindIE ATB
-        env["ATB_LOG_LEVEL"] = "ERROR"
+        env["ATB_LOG_LEVEL"] = env.pop("ATB_LOG_LEVEL", "ERROR")
         env["ATB_LOG_TO_STDOUT"] = "1"
         env["ATB_LOG_TO_FILE"] = "0"
-        env["LOG_LEVEL"] = "ERROR"
+        env["ATB_STREAM_SYNC_EVERY_KERNEL_ENABLE"] = env.pop(
+            "ATB_STREAM_SYNC_EVERY_KERNEL_ENABLE", "0"
+        )
+        env["LOG_LEVEL"] = env.pop("LOG_LEVEL", "ERROR")
         env["LOG_TO_STDOUT"] = "1"
         env["LOG_TO_FILE"] = "0"
         # -- Ascend MindIE Model
-        env["ASDOPS_LOG_LEVEL"] = "ERROR"
+        env["ASDOPS_LOG_LEVEL"] = env.pop("ASDOPS_LOG_LEVEL", "ERROR")
         env["ASDOPS_LOG_TO_STDOUT"] = "1"
         env["ASDOPS_LOG_TO_FILE"] = "0"
-        env["ATB_STREAM_SYNC_EVERY_KERNEL_ENABLE"] = "0"
         # -- Ascend MindIE OCK
-        env["OCK_LOG_LEVEL"] = "ERROR"
+        env["OCK_LOG_LEVEL"] = env.pop("OCK_LOG_LEVEL", "ERROR")
         env["OCK_LOG_TO_STDOUT"] = "1"
         env["OCK_LOG_TO_FILE"] = "0"
         # -- Ascend MindIE Torch
-        env["TORCH_AIE_LOG_LEVEL"] = "3"  # 0: DEBUG, 1: INFO, 2: WARN, 3: ERROR
+        env["TORCH_AIE_LOG_LEVEL"] = env.pop(
+            "TORCH_AIE_LOG_LEVEL", "3"
+        )  # 0: DEBUG, 1: INFO, 2: WARN, 3: ERROR
         env["TORCH_AIE_PRINT_TO_STDOUT"] = "1"
         env["TORCH_AIE_PRINT_TO_FILE"] = "0"
 
         # - Listening config
+        serving_port = minstance.ports[0] if minstance.ports else minstance.port
         server_config["ipAddress"] = "0.0.0.0"
         server_config.pop("managementIpAddress", None)
         server_config["allowAllZeroIpListening"] = True
         server_config["maxLinkNum"] = 1000
-        server_config["port"] = self._model_instance.port
-        server_config["managementPort"] = self._model_instance.port
-        server_config["metricsPort"] = self._model_instance.port
+        server_config["port"] = serving_port
+        server_config["managementPort"] = serving_port
+        server_config["metricsPort"] = serving_port
         server_config["httpsEnabled"] = False
         server_config["interCommTLSEnabled"] = False
 
         # - Device config
-        world_size = len(self._model_instance.gpu_indexes)
-        backend_config["npuDeviceIds"] = [self._model_instance.gpu_indexes]
-        backend_config["multiNodesInferEnabled"] = False
         backend_config["interNodeTLSEnabled"] = False
-        model_config["worldSize"] = world_size
+        backend_config["npuDeviceIds"] = [minstance.gpu_indexes]
+        model_config["worldSize"] = len(minstance.gpu_indexes)
+        backend_config["multiNodesInferEnabled"] = False
+        if subworkers:
+            connecting_port = minstance.ports[1] if len(minstance.ports) > 1 else None
+            backend_config["multiNodesInferEnabled"] = True
+            backend_config["multiNodesInferPort"] = connecting_port
+        if minstance.worker_id != self._worker.id:
+            backend_config["npuDeviceIds"] = [subworkers[subworker_pos].gpu_indexes]
+            model_config["worldSize"] = len(subworkers[subworker_pos].gpu_indexes)
 
         # - Model config
         derived_max_seq_len = self._get_model_max_seq_len()
@@ -829,7 +1048,7 @@ class AscendMindIEServer(InferenceServer):
         schedule_config["maxIterTimes"] = max_seq_len
         schedule_config["maxPrefillTokens"] = max_seq_len
         model_config["modelName"] = self._model.name
-        model_config["modelWeightPath"] = str(self.model_path_mapped)
+        model_config["modelWeightPath"] = str(self._model_path_mapped)
 
         # - Customize config, translate to Ascend MindIE configuration language,
         #   see https://www.hiascend.com/document/detail/zh/mindie/20RC1/mindieservice/servicedev/mindie_service0285.html,
@@ -839,13 +1058,18 @@ class AscendMindIEServer(InferenceServer):
         #       https://www.hiascend.com/document/detail/zh/mindie/20RC1/mindiellm/llmdev/mindie_llm0009.html,
         #       https://www.hiascend.com/document/detail/zh/mindie/20RC1/mindiellm/llmdev/mindie_llm0300.html,
         #       https://www.hiascend.com/document/detail/zh/mindie/20RC1/mindiellm/llmdev/mindie_llm0425.html.
+        local_world_size = len(minstance.gpu_indexes)
+        world_size = local_world_size
+        if subworkers:
+            world_size = local_world_size * (len(subworkers) + 1)
+        params = AscendMindIEParameters(
+            local_world_size=local_world_size,
+            world_size=world_size,
+            max_seq_len=max_seq_len,
+        )
         if self._model.backend_parameters:
             logger.debug(
                 f"Parsing given parameters: {os.linesep}{os.linesep.join(self._model.backend_parameters)}"
-            )
-            params = AscendMindIEParameters(
-                world_size=world_size,
-                max_seq_len=max_seq_len,
             )
             params.from_args(self._model.backend_parameters)
 
@@ -883,9 +1107,13 @@ class AscendMindIEServer(InferenceServer):
             if params.metrics:
                 env["MIES_SERVICE_MONITOR_MODE"] = "1"
             # --- Emitting operators in synchronous way.
-            env["TASK_QUEUE_ENABLE"] = "0" if params.enforce_eager else "1"
+            if params.enforce_eager:
+                env["MINDIE_ASYNC_SCHEDULING_ENABLE"] = "0"
+                env["TASK_QUEUE_ENABLE"] = "0"
+                env["ATB_OPERATION_EXECUTE_ASYNC"] = "0"
+                env["ASCEND_LAUNCH_BLOCKING"] = "1"
             # --- Mutating model config.
-            model_config_path = self.model_path_mapped.joinpath("config.json")
+            model_config_path = self._model_path_mapped.joinpath("config.json")
             with open(
                 model_config_path,
                 "r",
@@ -920,7 +1148,7 @@ class AscendMindIEServer(InferenceServer):
                 json.dump(model_path_config, f, indent=4, ensure_ascii=False)
             logger.info(f"Saved model config to {model_config_path}")
             # --- Mutating model generation config
-            model_generation_config_path = self.model_path_mapped.joinpath(
+            model_generation_config_path = self._model_path_mapped.joinpath(
                 "generation_config.json"
             )
             if params.override_generation_config_parsed:
@@ -986,6 +1214,14 @@ class AscendMindIEServer(InferenceServer):
                         "guess_set_size": params.lookahead_guess_set_size,
                     }
                 )
+            # --- Multi-token prediction
+            if params.enable_multi_token_prediction:
+                model_config["plugin_params"] = json.dumps(
+                    {
+                        "plugin_type": "mtp",
+                        "num_speculative_tokens": params.multi_token_prediction_tokens,
+                    }
+                )
             # --- Prefix cache
             if params.enable_prefix_caching:
                 schedule_config["enablePrefixCache"] = True
@@ -994,27 +1230,108 @@ class AscendMindIEServer(InferenceServer):
                         "plugin_type": "prefix_cache",
                     }
                 )
-            # --- Data Parallelism
-            dp = params.data_parallel_size
-            tp = params.tensor_parallel_size
-            if dp > 0:
-                model_config["dp"] = dp
-            if tp > 0:
-                model_config["tp"] = tp
-                model_config["moe_tp"] = tp if dp <= 0 else world_size
-                if params.enable_expert_parallel:
-                    model_config["moe_ep"] = dp
-                    model_config["moe_tp"] = tp
+            # --- Parallelism
+            if params.pipeline_parallel_size > 1:
+                model_config["pp"] = params.pipeline_parallel_size
+                model_config["tp"] = params.tensor_parallel_size
+            else:
+                if params.data_parallel_size > 0:
+                    model_config["dp"] = params.data_parallel_size
+                if params.tensor_parallel_size > 0:
+                    model_config["tp"] = params.tensor_parallel_size
+                    model_config["moe_tp"] = params.moe_tensor_parallel_size
+                if params.moe_expert_parallel_size > 0:
+                    model_config["moe_ep"] = params.moe_expert_parallel_size
+                    model_config["moe_tp"] = params.moe_tensor_parallel_size
+                if params.sequence_parallel_size > 0:
+                    model_config["sp"] = params.sequence_parallel_size
+            # --- Asynchronous scheduling
+            if params.max_batch_size <= 50:
+                env["MINDIE_ASYNC_SCHEDULING_ENABLE"] = "0"
             # --- Buffer response
             if params.enable_buffer_response:
                 schedule_config["bufferResponseEnabled"] = True
                 schedule_config["prefillExpectedTime"] = params.prefill_expected_time_ms
                 schedule_config["decodeExpectedTime"] = params.decode_expected_time_ms
 
-        # Generate JSON configuration file by model instance id
-        config_path = install_path.joinpath(
-            "conf", f"config-{self._model_instance.id}.json"
-        )
+        # Generate rank table file if needed,
+        # see https://www.hiascend.com/document/detail/zh/mindie/20RC2/envdeployment/instg/mindie_instg_0027.html,
+        #     https://www.hiascend.com/forum/thread-0237183374051498211-1-1.html
+        rank_table_str = None
+        if subworkers:
+            server_count = f"{len(subworkers) + 1}"
+            server_list = [
+                {
+                    "server_id": minstance.worker_ip,
+                    "container_ip": minstance.worker_ip,
+                    "device": [
+                        {
+                            "device_id": str(minstance.gpu_indexes[i]),
+                            "device_ip": minstance.gpu_addresses[i],
+                            "rank_id": str(i),
+                        }
+                        for i in range(len(minstance.gpu_indexes))
+                    ],
+                },
+            ]
+            for i, sw in enumerate(subworkers):
+                server_list.append(
+                    {
+                        "server_id": sw.worker_ip,
+                        "container_ip": sw.worker_ip,
+                        "device": [
+                            {
+                                "device_id": str(sw.gpu_indexes[j]),
+                                "device_ip": sw.gpu_addresses[j],
+                                "rank_id": str(j + len(sw.gpu_indexes) * (i + 1)),
+                            }
+                            for j in range(len(sw.gpu_indexes))
+                        ],
+                    }
+                )
+            # Save rank table to a JSON file.
+            rank_table = {
+                "version": "1.0",
+                "server_count": server_count,
+                "server_list": server_list,
+                "status": "completed",
+            }
+            rank_table_path = self._model_path_mapped.joinpath("ranktable.json")
+            rank_table_str = json.dumps(rank_table, indent=4, ensure_ascii=False)
+            with open(
+                rank_table_path,
+                "w",
+                encoding="utf-8",
+            ) as f:
+                f.write(rank_table_str)
+            # - Change mode to 640.
+            rank_table_path.chmod(0o640)
+            # - Set environment variables.
+            env["WORLD_SIZE"] = str(len(minstance.gpu_indexes) * (len(subworkers) + 1))
+            env["RANKTABLEFILE"] = str(rank_table_path)
+            env["RANK_TABLE_FILE"] = str(rank_table_path)
+            env["MIES_CONTAINER_IP"] = env.pop("MIES_CONTAINER_IP", self._worker.ip)
+            env["HOST_IP"] = env.pop("HOST_IP", self._worker.ip)
+            env["ATB_LLM_HCCL_ENABLE"] = env.pop("ATB_LLM_HCCL_ENABLE", "1")
+            env["ATB_LLM_COMM_BACKEND"] = env.pop("ATB_LLM_COMM_BACKEND", "hccl")
+            env["HCCL_CONNECT_TIMEOUT"] = env.pop("HCCL_CONNECT_TIMEOUT", "7200")
+            env["HCCL_EXEC_TIMEOUT"] = env.pop("HCCL_EXEC_TIMEOUT", "0")
+            env["HCCL_RDMA_PCIE_DIRECT_POST_NOSTRICT"] = env.pop(
+                "HCCL_RDMA_PCIE_DIRECT_POST_NOSTRICT", "TRUE"
+            )
+            if env.get("CANN_CHIP", "310p") != "310p":
+                env["HCCL_OP_EXPANSION_MODE"] = env.pop("HCCL_OP_EXPANSION_MODE", "AIV")
+            # NB(thxCode): For deterministic calculation, needs the following environment variables.
+            # LCCL_DETERMINISTIC=1
+            # ATB_WORKSPACE_MEM_ALLOC_GLOBAL=1
+            # HCCL_DETERMINISTIC=true
+            # ATB_MATMUL_SHUFFLE_K_ENABLE=0
+            # ATB_LLM_LCOC_ENABLE=0
+            # HCCL_OP_EXPANSION_MODE=""
+            logger.info(f"Saved Ascend MindIE rank table config to {rank_table_path}")
+
+        # Generate JSON configuration file by model instance id.
+        config_path = install_path.joinpath("conf", f"config-{minstance.id}.json")
         config_str = json.dumps(config, indent=4, ensure_ascii=False)
         with open(
             config_path,
@@ -1022,6 +1339,8 @@ class AscendMindIEServer(InferenceServer):
             encoding="utf-8",
         ) as f:
             f.write(config_str)
+        # - Change mode to 640.
+        config_path.chmod(0o640)
         logger.info(f"Saved Ascend MindIE config to {config_path}")
 
         # Start, configure environment variable to indicate the JSON configuration file.
@@ -1043,11 +1362,16 @@ class AscendMindIEServer(InferenceServer):
                     env_view[k] = env.get(k, v)
             if env_view:
                 logger.info(
-                    f"With environment variables(inconsistent input items mean unchangeable):{os.linesep}{os.linesep.join(f'{k}={v}' for k, v in sorted(env_view.items()))}"
+                    f"With environment variables(inconsistent input items mean unchangeable):{os.linesep}"
+                    f"{os.linesep.join(f'{k}={v}' for k, v in sorted(env_view.items()))}"
                 )
             logger.info(
                 f"With JSON configuration(inconsistent input items mean unchangeable):{os.linesep}{config_str}"
             )
+            if rank_table_str:
+                logger.info(
+                    f"With rank table JSON configuration:{os.linesep}{rank_table_str}"
+                )
 
             # Fork, inject environment variables and set working directory.
             proc = subprocess.Popen(
@@ -1118,6 +1442,8 @@ class AscendMindIEServer(InferenceServer):
             with open(src, "rb") as src_file:
                 with open(dst, "wb") as dst_file:
                     dst_file.write(src_file.read())
+            # Change the file mode to 750
+            dst.chmod(0o750)
 
         logger.info(f"Mapped original model path {self._model_path} to {mapped}")
         return mapped
@@ -1127,7 +1453,7 @@ class AscendMindIEServer(InferenceServer):
         Report error message to the model instance.
         """
         error_message = f"Failed to run Ascend MindIE: {ex}"
-        logger.error(error_message)
+        logger.error(error_message, exc_info=True)
         try:
             patch_dict = {
                 "state_message": error_message,
