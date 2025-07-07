@@ -144,13 +144,14 @@ class GGUFParserCommandMutableParameters:
     cache_type_k: Optional[str] = None
     cache_type_v: Optional[str] = None
     ctx_size: int = 8192
+    override_tensor: Optional[List[str]] = None
     gpu_layers_draft: Optional[int] = None
     mmap: bool = False
     no_kv_offload: Optional[bool] = None
     split_mode: Optional[str] = None
     ubatch_size: Optional[int] = None
-    visual_max_image_size: [int] = None
-    max_projected_cache: [int] = None
+    visual_max_image_size: Optional[int] = None
+    max_projected_cache: int = 10
     swa_full: bool = False
     # Estimate/StableDiffusionCpp
     image_autoencoder_tiling: bool = True
@@ -171,6 +172,10 @@ class GGUFParserCommandMutableParameters:
 
     def from_args(self, args: List[str]):
         parser = argparse.ArgumentParser(exit_on_error=False, allow_abbrev=False)
+
+        # Default any True arguments here,
+        # so that they can be set to False later.
+        parser.set_defaults(image_autoencoder_tiling=True)
 
         # Estimate
         parser.add_argument(
@@ -223,6 +228,12 @@ class GGUFParserCommandMutableParameters:
             "--ctx-size",
             "-c",
             type=int,
+            required=False,
+        )
+        parser.add_argument(
+            "--override-tensor",
+            "-ot",
+            action='append',
             required=False,
         )
         parser.add_argument(
@@ -373,7 +384,7 @@ class GGUFParserCommandMutableParameters:
             args_parsed = parser.parse_known_args(args=args)
             for attr_name in [attr.name for attr in dataclasses.fields(self.__class__)]:
                 try:
-                    attr_value = getattr(args_parsed[0], attr_name)
+                    attr_value = getattr(args_parsed[0], attr_name, None)
                     if attr_value is not None:
                         try:
                             setattr(self, attr_name, attr_value)
@@ -398,7 +409,7 @@ class GGUFParserCommandMutableParameters:
                 # Skip internal properties.
                 continue
 
-            attr_value = getattr(self, attr_name)
+            attr_value = getattr(self, attr_name, None)
             if attr_value is not None:
                 if isinstance(attr_value, bool):
                     command.append(
@@ -406,10 +417,11 @@ class GGUFParserCommandMutableParameters:
                     )
                 elif isinstance(attr_value, int):
                     command.append(f"--{attr_name.replace('_', '-')}={str(attr_value)}")
+                elif isinstance(attr_value, list):
+                    for sv in attr_value:
+                        command.append(f"--{attr_name.replace('_', '-')}={str(sv)}")
                 else:
-                    command.extend(
-                        [f"--{attr_name.replace('_', '-')}", str(attr_value)]
-                    )
+                    command.append(f"--{attr_name.replace('_', '-')}={str(attr_value)}")
 
         if self.backend_version:
             # Parser v0.18.0+ supports estimating Sliding Window Attention (SWA) usage,
