@@ -326,8 +326,6 @@ class Scheduler:
                 model_instance.gpu_addresses = candidate.gpu_addresses
                 model_instance.distributed_servers = DistributedServers(
                     subordinate_workers=candidate.subordinate_workers,
-                    rpc_servers=candidate.rpc_servers,  # FIXME: Replace by subordinate_workers
-                    ray_actors=candidate.ray_actors,  # FIXME: Replace by subordinate_workers
                 )
                 if get_backend(model) == BackendEnum.ASCEND_MINDIE:
                     model_instance.distributed_servers.mode = (
@@ -427,6 +425,11 @@ async def evaluate_gguf_model(
         cache_dir=config.cache_dir,
         ollama_library_base_url=config.ollama_library_base_url,
     )
+    if (
+        task_output.resource_architecture
+        and not task_output.resource_architecture.is_deployable()
+    ):
+        raise ValueError("Not a supported model.")
 
     should_update = False
     if task_output.resource_claim_estimate.reranking and not model.categories:
@@ -608,12 +611,9 @@ def simplify_auto_config_value_error(e: ValueError) -> ValueError:
     Simplify the error message for ValueError exceptions.
     """
     message = str(e)
-    if "argument `trust_remote_code=True`" in message:
+    if "trust_remote_code=True" in message:
         return ValueError(
-            message.replace(
-                "argument `trust_remote_code=True`",
-                "backend parameter `--trust-remote-code`",
-            )
+            "The model contains custom code that must be executed to load correctly. If you trust the source, please pass the backend parameter `--trust-remote-code` to allow custom code to be run."
         )
     return ValueError("Not a supported model.")
 

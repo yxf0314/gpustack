@@ -7,9 +7,8 @@ import os
 import subprocess
 from dataclasses import dataclass
 import time
-from typing import List, Optional
+from typing import List, Optional, Dict, Tuple
 from dataclasses_json import dataclass_json
-
 
 from gpustack.config.config import get_global_config
 from gpustack.schemas.models import (
@@ -33,7 +32,7 @@ class GPUOffloadEnum(str, Enum):
 
 @dataclass_json
 @dataclass
-class layerMemoryEstimate:
+class LayerMemoryEstimate:
     uma: int
     nonuma: int
     handleLayers: Optional[int] = None
@@ -41,10 +40,10 @@ class layerMemoryEstimate:
 
 @dataclass_json
 @dataclass
-class memoryEstimate:
+class MemoryEstimate:
     fullOffloaded: bool
-    ram: layerMemoryEstimate
-    vrams: List[layerMemoryEstimate]
+    ram: LayerMemoryEstimate
+    vrams: List[LayerMemoryEstimate]
     offloadLayers: Optional[int] = None  # Not available for diffusion models
 
     def to_log_string(self) -> str:
@@ -64,8 +63,8 @@ class memoryEstimate:
 
 @dataclass_json
 @dataclass
-class estimate:
-    items: List[memoryEstimate]
+class Estimate:
+    items: List[MemoryEstimate]
     architecture: str
     embeddingOnly: bool = False
     imageOnly: bool = False
@@ -76,14 +75,71 @@ class estimate:
 
 @dataclass_json
 @dataclass
-class ggufParserOutput:
-    estimate: estimate
+class Architecture:
+    # Describe the model architecture,
+    # value from "model", "projector", "adapter" and so on.
+    type: Optional[str] = "model"
+    # Describe the model architecture name.
+    architecture: Optional[str] = None
+    # Describe the clip's projector type,
+    # only used when type is "projector".
+    clipProjectorType: Optional[str] = None
+    # Describe the adapter type,
+    # only used when type is "adapter".
+    adapterType: Optional[str] = None
+    # Describe the diffusion model architecture,
+    # only used when type is "diffusion".
+    diffusionArchitecture: Optional[str] = None
+    # Describe the conditioners of the diffusion model,
+    # only used when type is "diffusion".
+    diffusionConditioners: Optional[List[Dict]] = None
+    # Describe the autoencoder of the diffusion model,
+    # only used when type is "diffusion".
+    diffusionAutoencoder: Optional[Dict] = None
+
+    def is_deployable(self) -> bool:
+        """
+        Check if the model is deployable.
+        Returns:
+            bool: True if the model is deployable, False otherwise.
+        """
+
+        if self.type in ["projector", "adapter"] and not self.architecture:
+            return False
+
+        if self.architecture == "diffusion":
+            return bool(self.diffusionConditioners and self.diffusionAutoencoder)
+
+        return True
+
+    def __str__(self) -> str:
+        """
+        Get a string representation of the architecture.
+        """
+
+        if self.type == "projector":
+            return f"projector({self.clipProjectorType})"
+        elif self.type == "adapter":
+            return f"adapter({self.adapterType})"
+        else:
+            if self.architecture == "diffusion":
+                return f"diffusion model({self.diffusionArchitecture})"
+            else:
+                return f"model({self.architecture})"
+
+
+@dataclass_json
+@dataclass
+class GGUFParserOutput:
+    estimate: Estimate
+    architecture: Optional[Architecture] = None
 
 
 @dataclass
 class ModelResourceClaim:
     model: Model
-    resource_claim_estimate: estimate
+    resource_claim_estimate: Estimate
+    resource_architecture: Optional[Architecture] = None
 
     # overwrite the hash to use in uniquequeue
     def __hash__(self):
@@ -97,17 +153,17 @@ class ModelResourceClaim:
         return False
 
 
-def _get_empty_estimate(n_gpu: int = 1) -> estimate:
-    empty_layer_memory_estimate = layerMemoryEstimate(
+def _get_empty_estimate(n_gpu: int = 1) -> Tuple[Estimate, Architecture]:
+    empty_layer_memory_estimate = LayerMemoryEstimate(
         uma=0, nonuma=0, handleLayers=None
     )
-    memory_estimate = memoryEstimate(
+    memory_estimate = MemoryEstimate(
         offloadLayers=999,
         fullOffloaded=True,
         ram=empty_layer_memory_estimate,
         vrams=[empty_layer_memory_estimate for _ in range(n_gpu)],
     )
-    return estimate(
+    e = Estimate(
         items=[memory_estimate],
         contextSize=0,
         architecture="",
@@ -116,6 +172,8 @@ def _get_empty_estimate(n_gpu: int = 1) -> estimate:
         distributable=False,
         reranking=False,
     )
+    a = Architecture()
+    return e, a
 
 
 def _gguf_parser_env(model: Model) -> dict:
@@ -144,6 +202,11 @@ class GGUFParserCommandMutableParameters:
     cache_type_k: Optional[str] = None
     cache_type_v: Optional[str] = None
     ctx_size: int = 8192
+    rope_freq_base: Optional[float] = None
+    rope_freq_scale: Optional[float] = None
+    rope_scale: Optional[float] = None
+    rope_scaling: Optional[str] = None
+    yarn_orig_ctx: Optional[int] = None
     override_tensor: Optional[List[str]] = None
     gpu_layers_draft: Optional[int] = None
     mmap: bool = False
@@ -227,6 +290,31 @@ class GGUFParserCommandMutableParameters:
         parser.add_argument(
             "--ctx-size",
             "-c",
+            type=int,
+            required=False,
+        )
+        parser.add_argument(
+            "--rope-freq-base",
+            type=float,
+            required=False,
+        )
+        parser.add_argument(
+            "--rope-freq-scale",
+            type=float,
+            required=False,
+        )
+        parser.add_argument(
+            "--rope-scale",
+            type=float,
+            required=False,
+        )
+        parser.add_argument(
+            "--rope-scaling",
+            type=str,
+            required=False,
+        )
+        parser.add_argument(
+            "--yarn-orig-ctx",
             type=int,
             required=False,
         )
@@ -442,7 +530,6 @@ async def _gguf_parser_command(  # noqa: C901
     command = [
         bin_path,
         "--skip-tokenizer",
-        "--skip-architecture",
         "--skip-metadata",
         "--json",
     ]
@@ -503,11 +590,15 @@ async def calculate_model_resource_claim(
     if model.source == SourceEnum.LOCAL_PATH and not os.path.exists(model.local_path):
         # Skip the calculation if the model is not available, policies like spread strategy still apply.
         # TODO Support user provided resource claim for better scheduling.
-        estimate = _get_empty_estimate()
+        e, a = _get_empty_estimate()
         tensor_split = kwargs.get("tensor_split")
         if tensor_split:
-            estimate = _get_empty_estimate(n_gpu=len(tensor_split))
-        return ModelResourceClaim(model, estimate)
+            e, a = _get_empty_estimate(n_gpu=len(tensor_split))
+        return ModelResourceClaim(
+            model=model,
+            resource_claim_estimate=e,
+            resource_architecture=a,
+        )
 
     command = await _gguf_parser_command(model, offload, **kwargs)
     env = _gguf_parser_env(model)
@@ -532,7 +623,7 @@ async def calculate_model_resource_claim(
             )
 
         cmd_output = stdout.decode()
-        claim: ggufParserOutput = ggufParserOutput.from_json(cmd_output)
+        claim: GGUFParserOutput = GGUFParserOutput.from_json(cmd_output)
         latency = time.time() - start_time
 
         if offload == GPUOffloadEnum.Full:
@@ -552,7 +643,11 @@ async def calculate_model_resource_claim(
             )
             clear_vram_claim(claim)
 
-        return ModelResourceClaim(model, claim.estimate)
+        return ModelResourceClaim(
+            model=model,
+            resource_claim_estimate=claim.estimate,
+            resource_architecture=claim.architecture,
+        )
 
     except subprocess.CalledProcessError as e:
         raise Exception(
@@ -566,12 +661,12 @@ async def calculate_model_resource_claim(
         )
 
 
-def clear_vram_claim(claim: ggufParserOutput):
+def clear_vram_claim(claim: GGUFParserOutput):
     for item in claim.estimate.items:
         # gguf-parser provides vram claim when offloadLayers is 0 due to current llama.cpp behavior, but llama-box won't allocate such vram.
         if item.offloadLayers == 0:
             item.vrams = [
-                layerMemoryEstimate(uma=0, nonuma=0, handleLayers=0) for _ in item.vrams
+                LayerMemoryEstimate(uma=0, nonuma=0, handleLayers=0) for _ in item.vrams
             ]
 
 

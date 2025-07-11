@@ -186,18 +186,11 @@ def summarize_candidate_resource_claim(
     """
     computed_resource_claims = [candidate.computed_resource_claim]
 
-    if candidate.rpc_servers:
+    if candidate.subordinate_workers:
         computed_resource_claims.extend(
-            rpc.computed_resource_claim
-            for rpc in candidate.rpc_servers
-            if rpc.computed_resource_claim is not None
-        )
-
-    if candidate.ray_actors:
-        computed_resource_claims.extend(
-            actor.computed_resource_claim
-            for actor in candidate.ray_actors
-            if actor.computed_resource_claim is not None
+            sw.computed_resource_claim
+            for sw in candidate.subordinate_workers
+            if sw.computed_resource_claim is not None
         )
 
     ram, vram = 0, 0
@@ -369,6 +362,10 @@ def set_default_spec(model: ModelSpec) -> bool:
 
         if model_spec_in_catalog.env and model.env is None:
             model.env = model_spec_in_catalog.env
+            modified = True
+
+        if model_spec_in_catalog.categories and not model.categories:
+            model.categories = model_spec_in_catalog.categories
             modified = True
 
     return modified

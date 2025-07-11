@@ -30,14 +30,17 @@ logger = logging.getLogger(__name__)
 
 class LlamaBoxServer(InferenceServer):
     def start(self):  # noqa: C901
+        # Launch llama-box from <third_party>/bin/llama-box/llama-box-default,
+        # if allowing dynamic linking binary and builtin version is used,
+        # otherwise use the user-provided binary path in the config,
+        # i.e. <bin_dir>/llama-box/llama-box-<version> or <bin_dir>/llama-box/static/llama-box-<version>.
         version = (
             self._model.backend_version
             if self._model.backend_version
             else BUILTIN_LLAMA_BOX_VERSION
         )
         disabled_dynamic_link = (
-            is_disabled_dynamic_link(version, platform.device())
-            and self._config.bin_dir is not None
+            is_disabled_dynamic_link(version) and self._config.bin_dir is not None
         )
         if not disabled_dynamic_link and version == BUILTIN_LLAMA_BOX_VERSION:
             base_path = str(
@@ -247,12 +250,12 @@ def get_rpc_servers(
     rpc_tensor_split = []
     if (
         model_instance.distributed_servers
-        and model_instance.distributed_servers.rpc_servers
+        and model_instance.distributed_servers.subordinate_workers
     ):
-        for rpc_server in model_instance.distributed_servers.rpc_servers:
+        for rpc_server in model_instance.distributed_servers.subordinate_workers:
             r_worker = worker_map.get(rpc_server.worker_id)
             r_ip = r_worker.ip
-            r_port = r_worker.status.rpc_servers.get(rpc_server.gpu_index).port
+            r_port = r_worker.status.rpc_servers.get(rpc_server.gpu_indexes[0]).port
             r_ts = list((rpc_server.computed_resource_claim or {}).vram.values())
 
             rpc_tensor_split.extend(r_ts)

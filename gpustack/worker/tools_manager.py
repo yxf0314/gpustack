@@ -21,9 +21,8 @@ from gpustack.utils import platform, envs
 logger = logging.getLogger(__name__)
 
 
-BUILTIN_LLAMA_BOX_VERSION = "v0.0.159"
-BUILTIN_GGUF_PARSER_VERSION = "v0.20.1"
-BUILTIN_RAY_VERSION = "2.43.0"
+BUILTIN_LLAMA_BOX_VERSION = "v0.0.163"
+BUILTIN_GGUF_PARSER_VERSION = "v0.20.5"
 
 
 class ToolsManager:
@@ -173,8 +172,7 @@ class ToolsManager:
     def download_llama_box(self):
         version = BUILTIN_LLAMA_BOX_VERSION
         disabled_dynamic_link = (
-            is_disabled_dynamic_link(version, self._device)
-            and self._bin_dir is not None
+            is_disabled_dynamic_link(version) and self._bin_dir is not None
         )
         if disabled_dynamic_link:
             target_dir = (
@@ -256,7 +254,10 @@ class ToolsManager:
         self._download_acsend_mindie(version, target_dir)
 
     def install_versioned_llama_box(self, version: str):
-        disabled_dynamic_link = is_disabled_dynamic_link(version, self._device)
+        # Install the package to <bin_dir>/llama-box/llama-box-{version},
+        # if allowing dynamic linking binary,
+        # otherwise to <bin_dir>/llama-box/static/llama-box-{version}.
+        disabled_dynamic_link = is_disabled_dynamic_link(version)
         target_dir = Path(self._bin_dir) / "llama-box"
         if disabled_dynamic_link:
             target_dir = target_dir / "static"
@@ -290,10 +291,6 @@ class ToolsManager:
         self.install_versioned_package_by_pipx(
             "vllm",
             version,
-            extra_packages=[
-                "gpustack",  # To apply Ray patch for dist vLLM
-                f"ray=={BUILTIN_RAY_VERSION}",  # To avoid version conflict with Ray cluster
-            ],
         )
 
     def install_versioned_package_by_pipx(
@@ -681,7 +678,7 @@ class ToolsManager:
         platform_name = self._get_gguf_parser_platform_name()
         url_path = f"gpustack/gguf-parser-go/releases/download/{version}/gguf-parser-{platform_name}{suffix}"
 
-        logger.info(f"downloading gguf-parser-{platform_name} '{version}'")
+        logger.info(f"Downloading gguf-parser-{platform_name} '{version}'")
         self._download_file(url_path, target_file)
 
         if self._os != "windows":
@@ -726,7 +723,7 @@ class ToolsManager:
             logger.debug(f"{file_name} already exists, skipping download")
             return
 
-        logger.info(f"downloading fastfetch-{platform_name} '{version}'")
+        logger.info(f"Downloading fastfetch-{platform_name} '{version}'")
 
         tmp_file = os.path.join(fastfetch_tmp_dir, f"fastfetch-{platform_name}.zip")
         if os.path.exists(fastfetch_tmp_dir):
@@ -990,11 +987,12 @@ def get_llama_box_version_dir_name(
     return dir_name
 
 
-def is_disabled_dynamic_link(version: Optional[str], device: str) -> Optional[bool]:
+def is_disabled_dynamic_link(version: Optional[str]) -> Optional[bool]:
     if version is None:
         version = BUILTIN_LLAMA_BOX_VERSION
 
-    if version < "v0.0.157" or device == platform.DeviceTypeEnum.NPU.value:
+    # Support dynamic linking for llama-box after v0.0.157.
+    if version < "v0.0.157":
         return True
 
     return envs.get_gpustack_env_bool("DISABLE_DYNAMIC_LINK_LLAMA_BOX")
