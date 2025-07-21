@@ -372,7 +372,8 @@ class VLLMResourceFitSelector(ScheduleCandidatesSelector):
         if self._gpu_memory_utilization != 0:
             default_msg_list.append(
                 f"With --{self._gpu_memory_utilization_parameter_name}={self._gpu_memory_utilization}, "
-                f"All GPUs combined need to provide at least {byte_to_gib(int(self._vram_claim / self._gpu_memory_utilization))} GiB of total VRAM."
+                f"all GPUs combined need to provide at least {byte_to_gib(int(self._vram_claim / self._gpu_memory_utilization))} GiB of total VRAM "
+                f"and each GPU needs {int(self._gpu_memory_utilization * 100)}% of allocatable VRAM."
             )
         self._event_collector.add(
             EventLevelEnum.INFO,
@@ -694,6 +695,8 @@ class VLLMResourceFitSelector(ScheduleCandidatesSelector):
                 and allocatable_gpu_memory_utilization < self._gpu_memory_utilization
             ):
                 overcommit = True
+                if worker.name not in self._unsatisfied_gpu_messages:
+                    self._unsatisfied_gpu_messages[worker.name] = []
                 self._unsatisfied_gpu_messages[worker.name].append(gpu.index)
 
             # Record allocation info for scheduling message

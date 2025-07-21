@@ -59,6 +59,8 @@ class ModelParameters:
     num_key_value_heads: int = 1
     n_group: Optional[int] = None
     head_dim: Optional[int] = None
+    q_lora_rank: Optional[int] = None
+    kv_lora_rank: Optional[int] = None
     qk_rope_head_dim: Optional[int] = None
     qk_nope_head_dim: Optional[int] = None
     v_head_dim: Optional[int] = None
@@ -81,7 +83,8 @@ class ModelParameters:
             raise ValueError(f"Failed to get model {model.name} pretrained config")
         for attr_name in [attr.name for attr in dataclasses.fields(self.__class__)]:
             try:
-                if attr_value := getattr(pretrained_config, attr_name):
+                attr_value = getattr(pretrained_config, attr_name, None)
+                if attr_value is not None:
                     setattr(self, attr_name, attr_value)
             except AttributeError:
                 # If reach here, that means the field is an internal property,
@@ -97,7 +100,7 @@ class ModelParameters:
                 self.num_attention_heads = getattr(
                     llm_config, "num_attention_heads", None
                 )
-        if not self.qk_nope_head_dim and self.hidden_size and self.num_attention_heads:
+        if not self.head_dim and self.hidden_size and self.num_attention_heads:
             self.head_dim = self.hidden_size // self.num_attention_heads
         if not self.moe_num_experts:
             for key in [
@@ -131,7 +134,7 @@ class ModelParameters:
             ):
                 return ModelAttentionTypeEnum.GQA
             elif self.num_key_value_heads == self.num_attention_heads:
-                if self.n_group and self.n_group > 1:
+                if self.q_lora_rank and self.kv_lora_rank:
                     return ModelAttentionTypeEnum.MLA
                 return ModelAttentionTypeEnum.MHA
         return ModelAttentionTypeEnum.UNK
@@ -270,7 +273,7 @@ class AscendMindIEResourceFitSelector(ScheduleCandidatesSelector):
             reqeust_ram = safe_int(self._model.env.get("GPUSTACK_MODEL_RAM_CLAIM", 0))
             request_vram = safe_int(self._model.env.get("GPUSTACK_MODEL_VRAM_CLAIM", 0))
             if request_vram > 0:
-                return reqeust_ram, request_vram
+                return RequestEstimateUsage(reqeust_ram, request_vram)
 
         """
         RAM
@@ -1195,7 +1198,8 @@ class AscendMindIEResourceFitSelector(ScheduleCandidatesSelector):
         if self._serving_params.npu_memory_fraction:
             self._scheduling_messages.append(
                 f"With --npu-memory-fraction={self._serving_params.npu_memory_fraction}, "
-                f"All GPUs combined need to provide at least {(byte_to_gib(request_usage.vram) / self._serving_params.npu_memory_fraction):.2f} GiB of total VRAM."
+                f"all GPUs combined need to provide at least {(byte_to_gib(request_usage.vram) / self._serving_params.npu_memory_fraction):.2f} GiB of total VRAM "
+                f"and each GPU needs {int(self._serving_params.npu_memory_fraction * 100)}% of allocatable VRAM."
             )
 
         # Available worker devices: {Worker: {Device Index: Device}},

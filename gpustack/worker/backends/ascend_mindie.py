@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional, List
 from gpustack.schemas.models import ModelInstanceStateEnum
 from gpustack.utils import envs
-from gpustack.worker.backends.base import InferenceServer
+from gpustack.worker.backends.base import InferenceServer, is_ascend_310p
 from gpustack.utils.hub import (
     get_hf_text_config,
     get_max_model_len,
@@ -475,8 +475,15 @@ class AscendMindIEParameters:
         args_parsed = parser.parse_known_args(args=args)
         for attr_name in [attr.name for attr in dataclasses.fields(self.__class__)]:
             try:
-                if attr_value := getattr(args_parsed[0], attr_name):
-                    setattr(self, attr_name, attr_value)
+                attr_value = getattr(args_parsed[0], attr_name, None)
+                if attr_value is not None:
+                    try:
+                        setattr(self, attr_name, attr_value)
+                    except ValueError as e:
+                        # Never reach here, but just in case.
+                        raise argparse.ArgumentTypeError(
+                            f"Invalid value for --{attr_name.replace('_', '-')} {attr_value}"
+                        ) from e
             except AttributeError:
                 # If reach here, that means the field is an internal property,
                 # which would not register in the argument parser.
@@ -490,7 +497,7 @@ class AscendMindIEParameters:
         if self.max_input_token_len <= 0:
             self.max_input_token_len = self.max_seq_len
         # Schedule config
-        if self.max_preempt_count == 0:
+        if self.max_preempt_count == 0 and self.cpu_mem_size > 0:
             self.cpu_mem_size = 0
         # Extends or Features
         # -- Parallelism
@@ -556,7 +563,7 @@ class AscendMindIEParameters:
             raise argparse.ArgumentTypeError(
                 "--cpu-mem-size must be greater than or equal to 0"
             )
-        if not (0 < self.npu_memory_fraction < 1):
+        if not (0 < self.npu_memory_fraction <= 1):
             raise argparse.ArgumentTypeError(
                 "--npu-memory-fraction must be in the range (0, 1]"
             )
@@ -1067,6 +1074,12 @@ class AscendMindIEServer(InferenceServer):
             world_size=world_size,
             max_seq_len=max_seq_len,
         )
+        # For Ascend 310P, we need to default dtype to float16.
+        # As a workaround, we should allow users to override this with backend parameters.
+        if is_ascend_310p(self._worker):
+            original_params = self._model.backend_parameters or []
+            self._model.backend_parameters = ["--dtype=float16"]
+            self._model.backend_parameters.extend(original_params)
         if self._model.backend_parameters:
             logger.debug(
                 f"Parsing given parameters: {os.linesep}{os.linesep.join(self._model.backend_parameters)}"

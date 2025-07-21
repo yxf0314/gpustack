@@ -15,13 +15,13 @@ from gpustack.utils.hub import (
     get_max_model_len,
     get_pretrained_config,
 )
-from gpustack.worker.backends.base import InferenceServer
+from gpustack.worker.backends.base import InferenceServer, is_ascend_310p
 
 logger = logging.getLogger(__name__)
 
 
 class VLLMServer(InferenceServer):
-    def start(self):
+    def start(self):  # noqa: C901
         try:
             command_path = get_command_path("vllm")
             if self._model.backend_version:
@@ -38,13 +38,25 @@ class VLLMServer(InferenceServer):
             if derived_max_model_len and derived_max_model_len > 8192:
                 arguments.extend(["--max-model-len", "8192"])
 
-            auto_parallism_arguments = get_auto_parallelism_arguments(
+            auto_parallelism_arguments = get_auto_parallelism_arguments(
                 self._model.backend_parameters, self._model_instance
             )
-            arguments.extend(auto_parallism_arguments)
+            arguments.extend(auto_parallelism_arguments)
 
             if is_distributed_vllm(self._model_instance):
                 arguments.extend(["--distributed-executor-backend", "ray"])
+
+            # For Ascend 310P, we need to enforce eager execution and default dtype to float16,
+            # see example of https://vllm-ascend.readthedocs.io/en/latest/tutorials/single_node_300i.html.
+            # As a workaround, we should allow users to override this with backend parameters.
+            if is_ascend_310p(self._worker):
+                arguments.extend(
+                    [
+                        "--enforce-eager",
+                        "--dtype",
+                        "float16",
+                    ]
+                )
 
             if self._model.backend_parameters:
                 arguments.extend(self._model.backend_parameters)
@@ -62,15 +74,25 @@ class VLLMServer(InferenceServer):
             # they cannot be overridden by the user-defined arguments
             arguments.extend(built_in_arguments)
 
-            logger.info("Starting vllm server")
-            logger.debug(f"Run vllm with arguments: {' '.join(arguments)}")
-            if self._model.env:
-                logger.debug(
-                    f"Model environment variables: {', '.join(f'{key}={value}' for key, value in self._model.env.items())}"
-                )
+            logger.info(f"Starting vLLM server: {command_path}")
+            logger.debug(f"Run vLLM with arguments: {' '.join(arguments)}")
             env = os.environ.copy()
             self.set_vllm_distributed_env(env)
             env = self.get_inference_running_env(env)
+            env_view = None
+            if logger.isEnabledFor(logging.DEBUG):
+                env_view = env
+            elif self._model.env:
+                # If the model instance has its own environment variables,
+                # display the mutated environment variables.
+                env_view = self._model.env
+                for k, v in self._model.env.items():
+                    env_view[k] = env.get(k, v)
+            if env_view:
+                logger.info(
+                    f"With environment variables(inconsistent input items mean unchangeable):{os.linesep}"
+                    f"{os.linesep.join(f'{k}={v}' for k, v in sorted(env_view.items()))}"
+                )
             result = subprocess.run(
                 [command_path] + arguments,
                 stdout=sys.stdout,
@@ -79,7 +101,7 @@ class VLLMServer(InferenceServer):
             )
             self.exit_with_code(result.returncode)
         except Exception as e:
-            error_message = f"Failed to run the vllm server: {e}"
+            error_message = f"Failed to run the vLLM server: {e}"
             logger.error(error_message)
             try:
                 patch_dict = {

@@ -21,6 +21,7 @@ from gpustack.policies.candidate_selectors import (
     VLLMResourceFitSelector,
     VoxBoxResourceFitSelector,
 )
+from gpustack.policies.utils import ListMessageBuilder
 from gpustack.policies.worker_filters.label_matching_filter import LabelMatchingFilter
 from gpustack.policies.worker_filters.gpu_matching_filter import GPUMatchingFilter
 from gpustack.scheduler.model_registry import (
@@ -302,8 +303,7 @@ class Scheduler:
                 ):
                     model_instance.state = ModelInstanceStateEnum.PENDING
                     model_instance.state_message = (
-                        "No suitable workers.\n"
-                        "Details:\n" + "\n".join(f"- {msg}" for msg in messages)
+                        "No suitable workers.\nDetails:\n" + "".join(messages)
                     )
                 if state_message != "":
                     model_instance.state_message = state_message
@@ -361,7 +361,8 @@ async def find_candidate(
     ]
 
     worker_filter_chain = WorkerFilterChain(filters)
-    workers, messages = await worker_filter_chain.filter(workers)
+    workers, filter_messages = await worker_filter_chain.filter(workers)
+    messages = [str(ListMessageBuilder(filter_messages))]
 
     try:
         if is_gguf_model(model):
@@ -375,7 +376,7 @@ async def find_candidate(
         else:
             candidates_selector = VLLMResourceFitSelector(config, model)
     except Exception as e:
-        return None, [f"Failed to initial {model.backend} candidates selector: {e}"]
+        return None, [f"Failed to initialize {model.backend} candidates selector: {e}"]
 
     candidates = await candidates_selector.select_candidates(workers)
 
