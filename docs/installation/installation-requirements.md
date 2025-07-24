@@ -2,24 +2,18 @@
 
 This page describes the software and networking requirements for the nodes where GPUStack will be installed.
 
-## Python Requirements
-
-GPUStack requires Python version 3.10 to 3.12.
-
 ## Operating System Requirements
 
 GPUStack is supported on the following operating systems:
 
+- [x] Linux
 - [x] macOS
 - [x] Windows
-- [x] Linux
 
 GPUStack has been tested and verified to work on the following operating systems:
 
 | OS        | Versions        |
 | --------- | --------------- |
-| Windows   | 10, 11          |
-| macOS     | \>= 14          |
 | Ubuntu    | \>= 20.04       |
 | Debian    | \>= 11          |
 | RHEL      | \>= 8           |
@@ -27,6 +21,8 @@ GPUStack has been tested and verified to work on the following operating systems
 | Fedora    | \>= 36          |
 | OpenSUSE  | \>= 15.3 (leap) |
 | OpenEuler | \>= 22.03       |
+| macOS     | \>= 14          |
+| Windows   | 10, 11          |
 
 !!! note
 
@@ -139,13 +135,16 @@ GPUStack uses the following ports for communication:
 
 The following ports are used on GPUStack server when Ray is enabled for distributed vLLM across workers:
 
-| Ray Port  | Description                         |
-| --------- | ----------------------------------- |
-| TCP 8265  | Default Port for Ray dashboard      |
-| TCP 40096 | Default port for Ray (GCS server)   |
-| TCP 40097 | Default port for Ray Client Server  |
-| TCP 40098 | Default port for Ray node manager   |
-| TCP 40099 | Default port for Ray object manager |
+| Ray Port  | Description                                      |
+|-----------|--------------------------------------------------|
+| TCP 40096 | Default port for Ray (GCS server)                |
+| TCP 40097 | Default port for Ray Client Server               |
+| TCP 40098 | Default port for Ray node manager                |
+| TCP 40099 | Default port for Ray object manager              |
+| TCP 8265  | Default Port for Ray dashboard                   |
+| TCP 40101 | Default port for Ray dashboard agent gRPC listen |
+| TCP 52365 | Default port for Ray dashboard agent HTTP listen |
+| TCP 40103 | Default port for Ray metrics export              |
 
 For more information about Ray ports, refer to the [Ray documentation](https://docs.ray.io/en/latest/ray-core/configure.html#ports-configurations).
 
@@ -160,8 +159,11 @@ For more information about Ray ports, refer to the [Ray documentation](https://d
 
 The following ports are used on GPUStack worker when Ray is enabled for distributed vLLM across workers:
 
-| Ray Port        | Description                         |
-| --------------- | ----------------------------------- |
-| TCP 40098       | Default port for Ray node manager   |
-| TCP 40099       | Default port for Ray object manager |
-| TCP 40100-40131 | Port range for Ray worker processes |
+| Ray Port        | Description                                      |
+|-----------------|--------------------------------------------------|
+| TCP 40098       | Default port for Ray node manager                |
+| TCP 40099       | Default port for Ray object manager              |
+| TCP 40101       | Default port for Ray dashboard agent gRPC listen |
+| TCP 52365       | Default port for Ray dashboard agent HTTP listen |
+| TCP 40103       | Default port for Ray metrics export              |
+| TCP 40200-40999 | Port range for Ray worker processes              |

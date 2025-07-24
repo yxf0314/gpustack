@@ -50,6 +50,7 @@ extra_css:
   - stylesheets/extra.css
   - https://unpkg.com/katex@0/dist/katex.min.css
 markdown_extensions:
+  - attr_list
   - md_in_html
   - pymdownx.highlight
   - pymdownx.superfences
@@ -109,7 +110,7 @@ nav:
           - Audio: user-guide/playground/audio.md
           - Embedding: user-guide/playground/embedding.md
           - Rerank: user-guide/playground/rerank.md
-      - Model Management: user-guide/model-management.md
+      - Model Deployment Management: user-guide/model-deployment-management.md
       - Model Catalog: user-guide/model-catalog.md
       - Model File management: user-guide/model-file-management.md
       - API Key Management: user-guide/api-key-management.md
@@ -120,6 +121,7 @@ nav:
       - OpenAI Compatible APIs: user-guide/openai-compatible-apis.md
       - Image Generation APIs: user-guide/image-generation-apis.md
       - Rerank API: user-guide/rerank-api.md
+      - Desktop Setup: user-guide/desktop-setup.md
   - Using Models:
       - Using Large Language Models: using-models/using-large-language-models.md
       - Using Vision Language Models: using-models/using-vision-language-models.md
@@ -150,3 +152,4 @@ nav:
       - Chat: cli-reference/chat.md
       - Draw: cli-reference/draw.md
       - Download Tools: cli-reference/download-tools.md
+  - Migration: migration.md

@@ -8,8 +8,8 @@
 
 | OS      | Version                      | Arch  | Supported methods                                                                                        |
 | ------- | ---------------------------- | ----- | -------------------------------------------------------------------------------------------------------- |
-| Linux   | Ubuntu 22.04<br>Ubuntu 24.04 | AMD64 | [Docker Installation](#docker-installation) (Recommended)<br>[Installation Script](#installation-script) |
-| Windows | 10<br>11<br>Server 2022      | AMD64 | [Installation Script](#installation-script)                                                              |
+| Linux   | Ubuntu 22.04<br>Ubuntu 24.04 | AMD64 | [Docker Installation](#docker-installation) (Recommended)<br>[Installation Script](#installation-scriptdeprecated) |
+| Windows | 10<br>11      | AMD64 | [Desktop Installer](../desktop-installer.md) (Recommended)<br>[Installation Script](#installation-scriptdeprecated)                                                              |
 
 ## Prerequisites
 
@@ -182,8 +182,8 @@ docker run -d --name gpustack \
 
 ## Installation Script(Deprecated)
 
-!!! note
-      The installation script method is deprecated as of version 0.7.
+!!! warning
+      The installation script method is deprecated as of version 0.7. We recommend using Docker on Linux, and the [desktop installer](../desktop-installer.md) on macOS or Windows.
 
 #### Supported Devices
 
