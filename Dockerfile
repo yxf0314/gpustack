@@ -390,12 +390,10 @@ ARG TARGETARCH
 ARG CUDA_VERSION
 ARG CUDA_DEVEL_VERSION
 ARG TORCH_VERSION
-ARG TORCH_CUDA_ARCH_LIST
 
 ENV CUDA_VERSION=${CUDA_VERSION} \
     CUDA_DEVEL_VERSION=${CUDA_DEVEL_VERSION} \
-    TORCH_VERSION=${TORCH_VERSION} \
-    TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
+    TORCH_VERSION=${TORCH_VERSION}
 
 ## Install FlashInfer as a Python library for GPUStack (linux/amd64 only)
 
@@ -485,7 +483,7 @@ RUN <<EOF
 
     # Pre process
     # - Create virtual environment to place vox-box
-    python -m venv --system-site-packages ${PIPX_LOCAL_VENVS}/vox-box
+    python -m venv ${PIPX_LOCAL_VENVS}/vox-box
     # - Prepare environment
     source ${PIPX_LOCAL_VENVS}/vox-box/bin/activate
 
@@ -497,7 +495,7 @@ RUN <<EOF
 transformers==4.51.3
 vox-box==${VERSION}
 EOT
-    pip install --disable-pip-version-check --no-cache-dir --root-user-action ignore --force-reinstall --no-dependencies -r /tmp/requirements.txt \
+    pip install --disable-pip-version-check --no-cache-dir --root-user-action ignore --force-reinstall -r /tmp/requirements.txt \
         && ln -vsf ${PIPX_LOCAL_VENVS}/vox-box/bin/vox-box /usr/local/bin/vox-box
 
     # Download tools
