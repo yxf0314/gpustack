@@ -22,8 +22,8 @@ from gpustack.worker.backend_dependency_manager import BackendDependencyManager
 logger = logging.getLogger(__name__)
 
 
-BUILTIN_LLAMA_BOX_VERSION = "v0.0.169"
-BUILTIN_GGUF_PARSER_VERSION = "v0.22.0"
+BUILTIN_LLAMA_BOX_VERSION = "v0.0.171"
+BUILTIN_GGUF_PARSER_VERSION = "v0.22.1"
 
 
 class ToolsManager:
@@ -623,7 +623,7 @@ class ToolsManager:
                 major, minor = map(int, match.groups())
                 if major == 8 and minor >= 2 and version > "v0.0.168":
                     toolkit_version = "8.2"
-                if major == 8 and minor >= 1 and version > "v0.0.144":
+                elif major == 8 and minor >= 1 and version > "v0.0.144":
                     toolkit_version = "8.1"
             # Currently, llama-box only supports release candidate version of CANN 8.1/8.2.
             if toolkit_version in ["8.1", "8.2"]:
