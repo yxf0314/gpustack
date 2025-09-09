@@ -173,5 +173,6 @@ def get_built_in_backend() -> List[InferenceBackend]:
         InferenceBackend(backend_name=BackendEnum.VLLM, is_built_in=True),
         InferenceBackend(backend_name=BackendEnum.ASCEND_MINDIE, is_built_in=True),
         InferenceBackend(backend_name=BackendEnum.VOX_BOX, is_built_in=True),
+        InferenceBackend(backend_name=BackendEnum.SGLANG, is_build_in=True),
         InferenceBackend(backend_name=BackendEnum.CUSTOM, is_built_in=True),
     ]

@@ -52,6 +52,7 @@ class BackendEnum(str, Enum):
     VLLM = "vLLM"
     VOX_BOX = "VoxBox"
     ASCEND_MINDIE = "MindIE"
+    SGLANG = "SGLang"
     CUSTOM = "Custom"
 
 
