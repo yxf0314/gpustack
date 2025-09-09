@@ -18,6 +18,7 @@ from gpustack.policies.base import (
 from gpustack.policies.candidate_selectors import (
     AscendMindIEResourceFitSelector,
     GGUFResourceFitSelector,
+    SGLangResourceFitSelector,
     VLLMResourceFitSelector,
     VoxBoxResourceFitSelector,
 )
@@ -390,6 +391,8 @@ async def find_candidate(
             )
         elif model.backend == BackendEnum.ASCEND_MINDIE:
             candidates_selector = AscendMindIEResourceFitSelector(config, model)
+        elif model.backend == BackendEnum.SGLANG:
+            candidates_selector = SGLangResourceFitSelector(config, model)
         elif model.backend == BackendEnum.CUSTOM:
             candidates_selector = CustomBackendResourceFitSelector(config, model)
         else:

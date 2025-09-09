@@ -30,6 +30,7 @@ from gpustack.worker.backends.llama_box import LlamaBoxServer
 from gpustack.worker.backends.vllm import VLLMServer
 from gpustack.worker.backends.vox_box import VoxBoxServer
 from gpustack.worker.backends.custom import CustomServer
+from gpustack.worker.backends.sglang import SGLangServer
 from gpustack.client import ClientSet
 from gpustack.schemas.models import (
     BackendEnum,
