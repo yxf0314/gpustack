@@ -223,6 +223,7 @@ class InferenceServer(ABC):
         """
         minstance = self._model_instance
         dservers = minstance.distributed_servers
+        gpu_indexes = None
         if (
             dservers
             and dservers.subordinate_workers
@@ -238,7 +239,11 @@ class InferenceServer(ABC):
             )
             gpu_indexes = sorted(subworker.gpu_indexes)
         else:
-            gpu_indexes = sorted(self._model_instance.gpu_indexes)
+            if (
+                self._model_instance.gpu_indexes
+                and len(self._model_instance.gpu_indexes) > 1
+            ):
+                gpu_indexes = sorted(self._model_instance.gpu_indexes)
 
         # When doing manual selection, the device type is further confirmed in the selection information.
         # This helps to find the correct item when there are multiple devices mixed in one node.
