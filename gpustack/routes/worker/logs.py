@@ -1,25 +1,154 @@
 import asyncio
 import logging
+import os
+from dataclasses import dataclass
 import time
 from pathlib import Path
 
 from tenacity import RetryError
-from typing import Optional
+from typing import Annotated, Optional
 
-from fastapi import APIRouter, Request, Query
+from fastapi import APIRouter, Depends, Request, Query
 from fastapi.responses import StreamingResponse
 from gpustack_runtime.deployer import logs_workload
 
 from gpustack.api.exceptions import NotFoundException
+from gpustack.api.auth import worker_auth
 from gpustack.worker.logs import LogOptions, LogOptionsDep, log_generator
 from gpustack.utils import file
 from gpustack.server.deps import SessionDep
+from gpustack.utils import platform
 from gpustack import envs
 
 
 router = APIRouter()
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ServiceLogOptions:
+    tail: int = 2000
+    follow: bool = False
+    since_seconds: Optional[int] = None
+    timestamps: bool = False
+
+
+def get_service_log_options(
+    tail: int = Query(default=2000, ge=-1),
+    follow: bool = Query(default=False),
+    since_seconds: Optional[int] = Query(default=None, ge=1),
+    timestamps: bool = Query(default=False),
+) -> ServiceLogOptions:
+    return ServiceLogOptions(
+        tail=tail, follow=follow, since_seconds=since_seconds, timestamps=timestamps
+    )
+
+
+ServiceLogOptionsDep = Annotated[ServiceLogOptions, Depends(get_service_log_options)]
+
+
+async def _stream_k8s_pod_logs(
+    namespace: str,
+    pod: str,
+    options: ServiceLogOptions,
+):
+    from kubernetes_asyncio import client as k8s_client
+    from kubernetes_asyncio.client import Configuration
+    from kubernetes_asyncio.config.incluster_config import (
+        InClusterConfigLoader,
+        SERVICE_CERT_FILENAME,
+        SERVICE_TOKEN_FILENAME,
+    )
+
+    configuration = Configuration()
+    loader = InClusterConfigLoader(
+        token_filename=SERVICE_TOKEN_FILENAME,
+        cert_filename=SERVICE_CERT_FILENAME,
+    )
+    loader.load_and_set(configuration)
+
+    api_client = k8s_client.ApiClient(configuration=configuration)
+    v1 = k8s_client.CoreV1Api(api_client=api_client)
+
+    tail_lines = options.tail if options.tail >= 0 else None
+    if options.follow:
+        resp = await v1.read_namespaced_pod_log(
+            name=pod,
+            namespace=namespace,
+            follow=True,
+            timestamps=options.timestamps,
+            tail_lines=tail_lines,
+            since_seconds=options.since_seconds,
+            _preload_content=False,
+        )
+        try:
+            async for chunk in resp.content.iter_any():
+                yield chunk
+        finally:
+            await resp.release()
+    else:
+        content = await v1.read_namespaced_pod_log(
+            name=pod,
+            namespace=namespace,
+            follow=False,
+            timestamps=options.timestamps,
+            tail_lines=tail_lines,
+            since_seconds=options.since_seconds,
+        )
+        if not isinstance(content, bytes):
+            content = str(content).encode("utf-8", errors="replace")
+        yield content
+
+
+async def _stream_docker_container_logs(
+    container: str,
+    options: ServiceLogOptions,
+):
+    import aiohttp
+
+    if not os.path.exists("/var/run/docker.sock"):
+        raise FileNotFoundError("/var/run/docker.sock not found")
+
+    params = {
+        "stdout": "1",
+        "stderr": "1",
+        "follow": "1" if options.follow else "0",
+        "timestamps": "1" if options.timestamps else "0",
+    }
+    if options.since_seconds is not None:
+        params["since"] = str(options.since_seconds)
+    if options.tail >= 0:
+        params["tail"] = str(options.tail)
+    else:
+        params["tail"] = "all"
+
+    connector = aiohttp.UnixConnector(path="/var/run/docker.sock")
+    async with aiohttp.ClientSession(connector=connector) as session:
+        url = f"http://docker/containers/{container}/logs"
+        async with session.get(url, params=params) as resp:
+            if resp.status == 404:
+                raise NotFoundException(message=f"Container '{container}' not found")
+            if resp.status >= 400:
+                body = await resp.read()
+                raise RuntimeError(
+                    f"Failed to read container logs (status={resp.status}): {body!r}"
+                )
+
+            if options.follow:
+                async for chunk in resp.content.iter_any():
+                    yield chunk
+            else:
+                yield await resp.read()
+
+
+def _read_k8s_namespace() -> Optional[str]:
+    namespace_path = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+    try:
+        with open(namespace_path, "r", encoding="utf-8") as f:
+            return f.read().strip() or None
+    except Exception:
+        return None
 
 
 def is_container_logs_ready(model_instance_name: str) -> bool:
@@ -417,5 +546,35 @@ async def get_serve_logs(
             model_instance_name,
             file_log_exists,
         ),
+        media_type="application/octet-stream",
+    )
+
+
+@router.get("/serviceLogs", dependencies=[Depends(worker_auth)])
+async def get_service_logs(
+    request: Request,
+    options: ServiceLogOptions = ServiceLogOptionsDep,
+):
+    """Stream GPUStack service logs from the local runtime environment."""
+
+    if platform.is_inside_kubernetes():
+        namespace = _read_k8s_namespace()
+        pod = os.getenv("HOSTNAME")
+        if not namespace or not pod:
+            raise NotFoundException(message="Failed to resolve pod identity")
+        return StreamingResponse(
+            _stream_k8s_pod_logs(namespace=namespace, pod=pod, options=options),
+            media_type="application/octet-stream",
+        )
+
+    container_name = (
+        os.getenv("GPUSTACK_RUNTIME_DEPLOY_MIRRORED_NAME") or "gpustack-worker"
+    )
+    if not os.path.exists("/var/run/docker.sock"):
+        raise NotFoundException(
+            message="Docker socket not available; cannot read service logs"
+        )
+    return StreamingResponse(
+        _stream_docker_container_logs(container=container_name, options=options),
         media_type="application/octet-stream",
     )

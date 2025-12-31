@@ -2,8 +2,9 @@ import secrets
 import datetime
 import base64
 from typing import Optional
-from fastapi import APIRouter, Depends, Response
-from fastapi.responses import StreamingResponse
+import aiohttp
+from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from gpustack.api.exceptions import (
     AlreadyExistsException,
@@ -11,12 +12,14 @@ from gpustack.api.exceptions import (
     NotFoundException,
     ForbiddenException,
 )
+from gpustack.api.responses import StreamingResponseWithStatusCode
 from gpustack.config.config import get_global_config
 from gpustack.server.deps import (
     SessionDep,
     EngineDep,
     CurrentUserDep,
 )
+from gpustack.utils.network import use_proxy_env_for_url
 from gpustack.schemas.workers import (
     WorkerCreate,
     WorkerListParams,
@@ -38,6 +41,8 @@ from gpustack.schemas.config import (
 from gpustack.security import get_secret_hash, API_KEY_PREFIX
 from gpustack.server.services import WorkerService
 from gpustack.cloud_providers.common import key_bytes_to_openssh_pem
+from gpustack.worker.logs import LogOptionsDep
+from gpustack import envs
 
 router = APIRouter()
 system_name_prefix = "system/worker"
@@ -123,6 +128,78 @@ async def get_worker(
     if user.worker is not None and user.worker.id == worker.id:
         return to_worker_public(worker, True)
     return worker
+
+
+@router.get("/{id}/logs/service")
+async def get_worker_service_logs(
+    request: Request,
+    session: SessionDep,
+    id: int,
+    log_options: LogOptionsDep,
+):
+    worker = await Worker.one_by_id(session, id)
+    if not worker:
+        raise NotFoundException(message="worker not found")
+    if worker.deleted_at is not None:
+        raise NotFoundException(message="worker not found")
+    if not worker.advertise_address or not worker.port:
+        raise NotFoundException(message="worker endpoint not available")
+
+    worker_log_url = (
+        f"http://{worker.advertise_address}:{worker.port}/serviceLogs"
+        f"?{log_options.url_encode()}"
+    )
+
+    timeout = aiohttp.ClientTimeout(total=envs.PROXY_TIMEOUT, sock_connect=5)
+    use_proxy_env = use_proxy_env_for_url(worker_log_url)
+    client: aiohttp.ClientSession = (
+        request.app.state.http_client
+        if use_proxy_env
+        else request.app.state.http_client_no_proxy
+    )
+
+    headers = {
+        "Authorization": f"Bearer {worker.token}",
+    }
+
+    if log_options.follow:
+
+        async def proxy_stream():
+            try:
+                async with client.get(
+                    worker_log_url, timeout=timeout, headers=headers
+                ) as resp:
+                    if resp.status != 200:
+                        body = await resp.read()
+                        yield body, resp.headers, resp.status
+                        return
+                    async for chunk in resp.content.iter_any():
+                        yield chunk, resp.headers, resp.status
+            except TimeoutError:
+                yield (
+                    "\x1b[999;1H"
+                    + f"Log stream timed out ({timeout.total} seconds). Please reopen the log page.\n",
+                    {},
+                    status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+            except Exception as e:
+                yield (
+                    "\x1b[999;1H" + f"Error fetching worker logs: {str(e)}\n",
+                    {},
+                    status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
+        return StreamingResponseWithStatusCode(
+            proxy_stream(),
+            media_type="application/octet-stream",
+        )
+
+    try:
+        async with client.get(worker_log_url, timeout=timeout, headers=headers) as resp:
+            content = await resp.text()
+            return PlainTextResponse(content=content, status_code=resp.status)
+    except Exception as e:
+        raise InternalServerErrorException(message=f"Error fetching worker logs: {e}")
 
 
 def update_worker_data(
