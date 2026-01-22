@@ -30,7 +30,7 @@ from gpustack.schemas.inference_backend import (
     VersionListItem,
     is_built_in_backend,
 )
-from gpustack.schemas.models import BackendEnum, Model
+from gpustack.schemas.models import BackendEnum, Model, BackendSourceEnum
 from gpustack.server.deps import ListParamsDep, SessionDep
 from gpustack_runner import list_service_runners
 from gpustack_runtime.detector.ascend import get_ascend_cann_variant
@@ -341,6 +341,13 @@ async def list_backend_configs(  # noqa: C901
     try:
         inference_backends = await InferenceBackend.all(session)
         for backend in inference_backends:
+            # Filter out community backends that are not enabled
+            if (
+                backend.backend_source == BackendSourceEnum.COMMUNITY
+                and not backend.enabled
+            ):
+                continue
+
             # Get versions from version_config
             versions: List[VersionListItem] = []
             if backend.version_configs and backend.version_configs.root:
