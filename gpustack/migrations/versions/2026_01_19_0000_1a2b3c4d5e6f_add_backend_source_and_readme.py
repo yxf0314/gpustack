@@ -1,0 +1,32 @@
+"""add backend_source and readme to inference_backends table
+
+Revision ID: 1a2b3c4d5e6f
+Revises: 53667f33f000
+Create Date: 2026-01-19 00:00:00.000000
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+import sqlmodel
+
+# revision identifiers, used by Alembic.
+revision: str = '1a2b3c4d5e6f'
+down_revision: Union[str, None] = '53667f33f000'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    with op.batch_alter_table('inference_backends', schema=None) as batch_op:
+        batch_op.add_column(sa.Column('backend_source', sqlmodel.sql.sqltypes.AutoString(), nullable=True))
+        batch_op.add_column(sa.Column('enabled', sa.Boolean(), nullable=True))
+        batch_op.add_column(sa.Column('icon', sa.Text(), nullable=True))
+
+
+def downgrade() -> None:
+    with op.batch_alter_table('inference_backends', schema=None) as batch_op:
+        batch_op.drop_column('readme')
+        batch_op.drop_column('enabled')
+        batch_op.drop_column('icon')

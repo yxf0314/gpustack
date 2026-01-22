@@ -9,7 +9,7 @@ from sqlmodel import SQLModel, Field as SQLField
 
 from gpustack.mixins import BaseModelMixin
 from .common import pydantic_column_type, PaginatedList
-from .models import BackendEnum
+from .models import BackendEnum, BackendSourceEnum
 
 
 class VersionConfig(BaseModel):
@@ -76,6 +76,9 @@ class InferenceBackendBase(SQLModel):
         default=None, sa_column=Column(Text, nullable=True)
     )
     health_check_path: Optional[str] = SQLField(default=None)
+    backend_source: Optional[BackendSourceEnum] = SQLField(default=None)
+    enabled: Optional[bool] = SQLField(default=False)
+    icon: Optional[str] = SQLField(default=None)
 
     def resolve_target_version(self, version: Optional[str] = None) -> Optional[str]:
         """
