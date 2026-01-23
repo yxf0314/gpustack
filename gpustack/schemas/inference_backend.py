@@ -258,6 +258,7 @@ class InferenceBackendPublic(InferenceBackendBase):
     updated_at: Optional[datetime]
     built_in_version_configs: Optional[Dict[str, VersionConfig]] = {}
     framework_index_map: Optional[Dict[str, List[str]]] = {}
+    recommend_models: Optional[List[str]] = []
 
 
 InferenceBackendsPublic = PaginatedList[InferenceBackendPublic]

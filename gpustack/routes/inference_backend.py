@@ -31,6 +31,7 @@ from gpustack.schemas.inference_backend import (
     is_built_in_backend,
 )
 from gpustack.schemas.models import BackendEnum, Model, BackendSourceEnum
+from gpustack.server.catalog import get_model_sets, get_model_set_specs
 from gpustack.server.deps import ListParamsDep, SessionDep
 from gpustack_runner import list_service_runners
 from gpustack_runtime.detector.ascend import get_ascend_cann_variant
@@ -341,13 +342,6 @@ async def list_backend_configs(  # noqa: C901
     try:
         inference_backends = await InferenceBackend.all(session)
         for backend in inference_backends:
-            # Filter out community backends that are not enabled
-            if (
-                backend.backend_source == BackendSourceEnum.COMMUNITY
-                and not backend.enabled
-            ):
-                continue
-
             # Get versions from version_config
             versions: List[VersionListItem] = []
             if backend.version_configs and backend.version_configs.root:
@@ -510,6 +504,48 @@ def _generate_framework_index_map(
     return framework_map
 
 
+async def collect_recommend_models(
+    merged_backends: List[InferenceBackendPublic],
+    filter_backends: List[InferenceBackendPublic],
+) -> None:
+    """
+    Collect model names that use community backends and set recommend_models for each backend.
+
+    Args:
+        merged_backends: List of merged inference backends from database
+        filter_backends: List of backends to set recommend_models on
+    """
+    # Build a set of community backend names
+    community_backend_names = {
+        b.backend_name
+        for b in merged_backends
+        if b.backend_source == BackendSourceEnum.COMMUNITY
+    }
+
+    # Collect model names that use community backends from catalog specs
+    backend_recommend_models: Dict[str, List[str]] = {}
+
+    model_set_specs = get_model_set_specs()
+    model_sets = get_model_sets()
+    for model_set_id, specs in model_set_specs.items():
+        # Get the model_set name from model_catalog
+        model_set = next((ms for ms in model_sets if ms.id == model_set_id), None)
+        model_set_name = model_set.name if model_set else ""
+
+        # Collect models using community backends
+        for spec in specs:
+            if spec.backend and spec.backend in community_backend_names:
+                if spec.backend not in backend_recommend_models:
+                    backend_recommend_models[spec.backend] = []
+                backend_recommend_models[spec.backend].append(model_set_name)
+
+    # Set recommend_models for each backend
+    for backend in filter_backends:
+        backend.recommend_models = backend_recommend_models.get(
+            backend.backend_name, []
+        )
+
+
 @router.get("", response_model=InferenceBackendsPublic)
 async def get_inference_backends(  # noqa: C901
     session: SessionDep,
@@ -593,6 +629,9 @@ async def get_inference_backends(  # noqa: C901
         backend.framework_index_map = _generate_framework_index_map(
             version_config_dicts
         )
+
+    # Collect and set recommend_models for community backends
+    await collect_recommend_models(merged_backends, filter_backends)
 
     # Apply pagination to merged results
     total = len(filter_backends)
