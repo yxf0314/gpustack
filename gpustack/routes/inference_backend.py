@@ -734,6 +734,7 @@ async def create_inference_backend(
             default_entrypoint=backend_in.default_entrypoint,
             health_check_path=backend_in.health_check_path,
             description=backend_in.description,
+            default_environment=backend_in.default_environment,
         )
         backend = await InferenceBackend.create(session, backend)
     except Exception as e:
@@ -806,6 +807,7 @@ async def update_inference_backend(
             "default_entrypoint": backend_in.default_entrypoint,
             "health_check_path": backend_in.health_check_path,
             "description": backend_in.description,
+            "default_environment": backend_in.default_environment,
         }
         await backend.update(session, update_data)
     except Exception as e:
@@ -903,6 +905,7 @@ async def create_inference_backend_from_yaml(
             "default_run_command",
             "health_check_path",
             "description",
+            "default_environment",
         ]
         yaml_data = {k: req_yaml_data[k] for k in allowed_keys if k in req_yaml_data}
 
@@ -977,6 +980,7 @@ async def update_inference_backend_from_yaml(  # noqa: C901
             "default_run_command",
             "health_check_path",
             "description",
+            "default_environment",
         ]
         if not is_built_in_backend(backend.backend_name):
             allowed_keys.append("default_version")

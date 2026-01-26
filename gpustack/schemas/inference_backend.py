@@ -1,3 +1,4 @@
+import re
 import shlex
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -79,6 +80,9 @@ class InferenceBackendBase(SQLModel):
     backend_source: Optional[BackendSourceEnum] = SQLField(default=None)
     enabled: Optional[bool] = SQLField(default=False)
     icon: Optional[str] = SQLField(default=None)
+    default_environment: Optional[Dict[str, str]] = SQLField(
+        sa_column=Column(JSON), default=None
+    )
 
     def resolve_target_version(self, version: Optional[str] = None) -> Optional[str]:
         """
@@ -158,7 +162,32 @@ class InferenceBackendBase(SQLModel):
         command = command.replace("{{port}}", str(port))
         command = command.replace("{{worker_ip}}", str(worker_ip))
         command = command.replace("{{model_name}}", model_name)
+
+        # Resolve environment variables using {{VAR_NAME}} syntax
+        if self.default_environment:
+            command = self._resolve_env_vars(command, self.default_environment)
+
         return command
+
+    def _resolve_env_vars(self, command: str, env_dict: Dict[str, str]) -> str:
+        """
+        Resolve {{VAR_NAME}} placeholders in the command string using the provided environment dict.
+
+        Args:
+            command: The command string with {{VAR_NAME}} placeholders
+            env_dict: Dictionary of environment variable names to values
+
+        Returns:
+            Command with placeholders replaced by their values.
+            If a variable is not found in env_dict, the placeholder is left unchanged.
+        """
+        pattern = r"\{\{([^}]+)\}\}"
+
+        def replace_var(match):
+            var_name = match.group(1).strip()
+            return env_dict.get(var_name, match.group(0))
+
+        return re.sub(pattern, replace_var, command)
 
     def get_container_entrypoint(
         self, version: Optional[str] = None
