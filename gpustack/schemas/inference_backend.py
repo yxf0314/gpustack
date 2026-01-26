@@ -13,6 +13,14 @@ from .common import pydantic_column_type, PaginatedList
 from .models import BackendEnum, BackendSourceEnum
 
 
+class ContainerEnvConfig(BaseModel):
+    """Container environment configuration."""
+
+    user: Optional[int] = None
+    group: Optional[int] = None
+    shm_size_gib: float = 10.0
+
+
 class VersionConfig(BaseModel):
     """
     Configuration for a specific version of an inference backend.
