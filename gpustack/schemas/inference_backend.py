@@ -189,10 +189,11 @@ class InferenceBackendBase(SQLModel):
             Command with placeholders replaced by their values.
             If a variable is not found in env_dict, the placeholder is left unchanged.
         """
-        pattern = r"\{\{([^}]+)\}\}"
+        # Match valid variable names: start with letter or underscore, followed by alphanumeric or underscore
+        pattern = r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}"
 
         def replace_var(match):
-            var_name = match.group(1).strip()
+            var_name = match.group(1)
             return env_dict.get(var_name, match.group(0))
 
         return re.sub(pattern, replace_var, command)

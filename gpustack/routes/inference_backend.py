@@ -527,10 +527,13 @@ async def collect_recommend_models(
 
     model_set_specs = get_model_set_specs()
     model_sets = get_model_sets()
+
+    # Build a dictionary for efficient lookup: model_set_id -> model_set_name
+    model_set_dict = {ms.id: ms.name for ms in model_sets}
+
     for model_set_id, specs in model_set_specs.items():
-        # Get the model_set name from model_catalog
-        model_set = next((ms for ms in model_sets if ms.id == model_set_id), None)
-        model_set_name = model_set.name if model_set else ""
+        # Get the model_set name from the dictionary
+        model_set_name = model_set_dict.get(model_set_id, "")
 
         # Collect models using community backends
         for spec in specs:

@@ -635,6 +635,12 @@ class Server:
                 logger.debug("No community backends found in community-backends.yaml")
                 return
 
+            if not isinstance(yaml_data, list):
+                logger.error(
+                    f"Invalid community-backends.yaml format: expected list, got {type(yaml_data).__name__}"
+                )
+                return
+
             for backend_config in yaml_data:
                 await self._upsert_community_backend(session, backend_config)
 
@@ -665,6 +671,7 @@ class Server:
             "health_check_path",
             "description",
             "icon",
+            "default_environment",
         ]
         backend_data = {k: config[k] for k in allowed_keys if k in config}
 

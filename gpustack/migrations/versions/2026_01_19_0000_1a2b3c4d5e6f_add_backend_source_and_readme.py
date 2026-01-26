@@ -27,6 +27,6 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     with op.batch_alter_table('inference_backends', schema=None) as batch_op:
-        batch_op.drop_column('readme')
+        batch_op.drop_column('backend_source')
         batch_op.drop_column('enabled')
         batch_op.drop_column('icon')
