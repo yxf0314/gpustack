@@ -722,7 +722,7 @@ async def create_inference_backend(
         )
 
     # Validate version names for custom backends before creating
-    validate_versions_suffix(backend_in.backend_name, None)
+    validate_custom_suffix(backend_in.backend_name, None)
 
     for version in backend_in.version_configs.root.keys():
         backend_in.version_configs.root[version].built_in_frameworks = None
@@ -791,10 +791,10 @@ async def update_inference_backend(
                 )
 
     # Validate version names for custom backends before updating
-    if backend.is_built_in:
-        validate_versions_suffix(None, backend_in.version_configs)
+    if backend.backend_source == BackendSourceEnum.CUSTOM:
+        validate_custom_suffix(backend_in.backend_name, None)
     else:
-        validate_versions_suffix(backend_in.backend_name, None)
+        validate_custom_suffix(None, backend_in.version_configs)
 
     for version in backend_in.version_configs.root.keys():
         backend_in.version_configs.root[version].built_in_frameworks = None
@@ -922,7 +922,7 @@ async def create_inference_backend_from_yaml(
             yaml_data['version_configs'] = VersionConfigDict(root=version_configs_dict)
 
         # Validate version names for custom backends
-        validate_versions_suffix(yaml_data['backend_name'], None)
+        validate_custom_suffix(yaml_data['backend_name'], None)
 
         # Create the backend
         backend = InferenceBackend(**yaml_data)
@@ -1019,10 +1019,10 @@ async def update_inference_backend_from_yaml(  # noqa: C901
                     )
 
         # Validate version names
-        if backend.is_built_in:
-            validate_versions_suffix(None, yaml_data['version_configs'])
+        if backend.backend_source == BackendSourceEnum.CUSTOM:
+            validate_custom_suffix(yaml_data['backend_name'], None)
         else:
-            validate_versions_suffix(yaml_data['backend_name'], None)
+            validate_custom_suffix(None, yaml_data['version_configs'])
 
         if yaml_data.get('version_configs') and yaml_data['version_configs'].root:
             for v in yaml_data['version_configs'].root.keys():
@@ -1043,7 +1043,7 @@ async def update_inference_backend_from_yaml(  # noqa: C901
         )
 
 
-def validate_versions_suffix(
+def validate_custom_suffix(
     backend_name: Optional[str],
     version_configs: Optional[VersionConfigDict],
 ):
