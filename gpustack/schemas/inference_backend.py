@@ -273,6 +273,8 @@ class InferenceBackendListItem(BaseModel):
     versions: Optional[List[VersionListItem]] = Field(
         None, description="Available versions for this backend"
     )
+    enabled: Optional[bool] = Field(None)
+    backend_source: Optional[BackendSourceEnum] = Field(None)
 
 
 class InferenceBackendResponse(BaseModel):

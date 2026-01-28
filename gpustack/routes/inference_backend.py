@@ -383,6 +383,8 @@ async def list_backend_configs(  # noqa: C901
                     default_backend_param=backend.default_backend_param,
                     versions=versions,
                     is_built_in=backend.is_built_in,
+                    enabled=backend.enabled,
+                    backend_source=backend.backend_source,
                 )
             else:
                 # For custom backends, use backend_name as show_name
@@ -392,6 +394,8 @@ async def list_backend_configs(  # noqa: C901
                     default_backend_param=backend.default_backend_param,
                     versions=versions,
                     is_built_in=False,
+                    enabled=backend.enabled,
+                    backend_source=backend.backend_source,
                 )
 
             items.append(backend_item)
@@ -403,6 +407,8 @@ async def list_backend_configs(  # noqa: C901
             default_backend_param=None,
             versions=[],
             is_built_in=False,
+            enabled=True,
+            backend_source=BackendSourceEnum.CUSTOM,
         )
         items.append(custom_backend_item)
 
