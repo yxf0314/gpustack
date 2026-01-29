@@ -24,6 +24,11 @@ def upgrade() -> None:
         batch_op.add_column(sa.Column('enabled', sa.Boolean(), nullable=True))
         batch_op.add_column(sa.Column('icon', sa.Text(), nullable=True))
         batch_op.add_column(sa.Column('default_environment', sa.JSON(), nullable=True))
+        # Change description column from String(255) to Text to support longer descriptions
+        batch_op.alter_column('description',
+                              existing_type=sa.String(length=255),
+                              type_=sa.Text(),
+                              existing_nullable=True)
 
 
 def downgrade() -> None:
@@ -32,3 +37,8 @@ def downgrade() -> None:
         batch_op.drop_column('enabled')
         batch_op.drop_column('icon')
         batch_op.drop_column('default_environment')
+        # Revert description column back to String(255)
+        batch_op.alter_column('description',
+                              existing_type=sa.Text(),
+                              type_=sa.String(length=255),
+                              existing_nullable=True)

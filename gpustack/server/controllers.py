@@ -2,6 +2,8 @@ import logging
 import random
 import string
 import asyncio
+import yaml
+from importlib.resources import files
 from typing import Any, Dict, List, Tuple, Optional, Set
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -15,10 +17,16 @@ from gpustack.policies.scorers.offload_layer_scorer import OffloadLayerScorer
 from gpustack.policies.scorers.placement_scorer import PlacementScorer, ScaleTypeEnum
 from gpustack.policies.base import ModelInstanceScore
 from gpustack.policies.scorers.status_scorer import StatusScorer
-from gpustack.schemas.inference_backend import InferenceBackend, get_built_in_backend
+from gpustack.schemas.inference_backend import (
+    InferenceBackend,
+    get_built_in_backend,
+    VersionConfig,
+    VersionConfigDict,
+)
 from gpustack.schemas.model_files import ModelFile, ModelFileStateEnum
 from gpustack.schemas.models import (
     BackendEnum,
+    BackendSourceEnum,
     ModelSource,
     MyModel,
     Model,
@@ -812,22 +820,135 @@ class WorkerController:
 
 class InferenceBackendController:
     """
-    Inference backend controller initializes built-in backends in the database.
+    Inference backend controller initializes built-in and community backends in the database.
     """
 
     async def start(self):
         async with async_session() as session:
-            for built_in_backend in get_built_in_backend():
-                if built_in_backend.backend_name == BackendEnum.CUSTOM.value:
-                    continue
-                backend = await InferenceBackend.one_by_field(
-                    session, "backend_name", built_in_backend.backend_name
+            # Initialize built-in backends
+            await self._init_built_in_backends(session)
+
+            # Initialize community backends
+            await self._init_community_backends(session)
+
+    async def _init_built_in_backends(self, session: AsyncSession):
+        """Initialize built-in backends in the database."""
+        for built_in_backend in get_built_in_backend():
+            if built_in_backend.backend_name == BackendEnum.CUSTOM.value:
+                continue
+
+            backend = await InferenceBackend.one_by_field(
+                session, "backend_name", built_in_backend.backend_name
+            )
+
+            if not backend:
+                # Create new built-in backend with backend_source
+                built_in_backend.backend_source = BackendSourceEnum.BUILT_IN
+                built_in_backend.enabled = True
+                await InferenceBackend.create(session, built_in_backend)
+                logger.info(
+                    f"Init built-in backend {built_in_backend.backend_name} in database"
                 )
-                if not backend:
-                    await InferenceBackend.create(session, built_in_backend)
-                    logger.info(
-                        f"Init built-in backend {built_in_backend.backend_name} in database"
-                    )
+            elif backend.backend_source is None:
+                # Update existing backend without backend_source
+                backend.backend_source = BackendSourceEnum.BUILT_IN
+                if backend.enabled is None:
+                    backend.enabled = True
+                await backend.update(
+                    session,
+                    {
+                        "backend_source": BackendSourceEnum.BUILT_IN,
+                        "enabled": (
+                            backend.enabled if backend.enabled is not None else True
+                        ),
+                    },
+                )
+                logger.info(
+                    f"Updated backend_source for existing built-in backend {backend.backend_name}"
+                )
+
+    async def _init_community_backends(self, session: AsyncSession):
+        """Load community backends from community-backends.yaml into database."""
+        try:
+            # Get the path to community-backends.yaml
+            yaml_file = files("gpustack.assets").joinpath(
+                "community_backends/community-backends.yaml"
+            )
+
+            if not yaml_file.is_file():
+                logger.debug(
+                    "community-backends.yaml not found, skipping community backend initialization"
+                )
+                return
+
+            yaml_data = yaml.safe_load(yaml_file.read_text())
+
+            if not yaml_data:
+                logger.debug("No community backends found in community-backends.yaml")
+                return
+
+            if not isinstance(yaml_data, list):
+                logger.error(
+                    f"Invalid community-backends.yaml format: expected list, got {type(yaml_data).__name__}"
+                )
+                return
+
+            for backend_config in yaml_data:
+                await self._upsert_community_backend(session, backend_config)
+
+            logger.debug("Community backends initialized from community-backends.yaml")
+
+        except (ModuleNotFoundError, FileNotFoundError):
+            # community_backends directory or yaml file does not exist
+            logger.debug(
+                "Community backends directory or file not found, skipping initialization"
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialize community backends: {e}")
+
+    async def _upsert_community_backend(self, session: AsyncSession, config: dict):
+        """Create or update a community backend from YAML configuration."""
+        backend_name = config.get("backend_name")
+        if not backend_name:
+            return
+
+        # Prepare backend data
+        allowed_keys = [
+            "backend_name",
+            "version_configs",
+            "default_version",
+            "default_backend_param",
+            "default_run_command",
+            "default_entrypoint",
+            "health_check_path",
+            "description",
+            "icon",
+            "default_environment",
+        ]
+        backend_data = {k: config[k] for k in allowed_keys if k in config}
+
+        # Set backend source
+        backend_data["backend_source"] = BackendSourceEnum.COMMUNITY
+        backend_data["enabled"] = False
+
+        # Convert version_configs to VersionConfigDict
+        if 'version_configs' in backend_data and backend_data['version_configs']:
+            backend_data['version_configs'] = VersionConfigDict(
+                root={
+                    version: VersionConfig(**ver_config)
+                    for version, ver_config in backend_data['version_configs'].items()
+                }
+            )
+
+        # Upsert: update if exists, create if not
+        existing = await InferenceBackend.one_by_field(
+            session, "backend_name", backend_name
+        )
+        if existing:
+            await existing.update(session, backend_data)
+        else:
+            backend = InferenceBackend(**backend_data)
+            await InferenceBackend.create(session, backend)
 
 
 class ModelFileController:

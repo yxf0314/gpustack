@@ -3,8 +3,6 @@ from multiprocessing import Process
 import os
 import re
 import aiohttp
-import yaml
-from importlib.resources import files
 
 import uvicorn
 import logging
@@ -23,12 +21,6 @@ from gpustack.schemas.api_keys import ApiKey
 from gpustack.schemas.workers import Worker
 from gpustack.schemas.clusters import Cluster, ClusterProvider, ClusterStateEnum
 from gpustack.schemas.models import Model
-from gpustack.schemas.inference_backend import (
-    InferenceBackend,
-    VersionConfig,
-    VersionConfigDict,
-)
-from gpustack.schemas.models import BackendSourceEnum
 from gpustack.security import (
     JWTManager,
     generate_secure_password,
@@ -353,7 +345,6 @@ class Server:
             self._migrate_legacy_workers,
             self._ensure_registration_token,
             self._cleanup_orphaned_gateway_data,
-            self._init_community_backends,
         ]
         for init_data_func in init_data_funcs:
             await init_data_func(session)
@@ -614,86 +605,3 @@ class Server:
             session=session, field="is_default", value=True
         )
         return cluster
-
-    async def _init_community_backends(self, session: AsyncSession):
-        """Load community backends from community-backends.yaml into database."""
-        try:
-            # Get the path to community-backends.yaml
-            yaml_file = files("gpustack.assets").joinpath(
-                "community_backends/community-backends.yaml"
-            )
-
-            if not yaml_file.is_file():
-                logger.debug(
-                    "community-backends.yaml not found, skipping community backend initialization"
-                )
-                return
-
-            yaml_data = yaml.safe_load(yaml_file.read_text())
-
-            if not yaml_data:
-                logger.debug("No community backends found in community-backends.yaml")
-                return
-
-            if not isinstance(yaml_data, list):
-                logger.error(
-                    f"Invalid community-backends.yaml format: expected list, got {type(yaml_data).__name__}"
-                )
-                return
-
-            for backend_config in yaml_data:
-                await self._upsert_community_backend(session, backend_config)
-
-            logger.debug("Community backends initialized from community-backends.yaml")
-
-        except (ModuleNotFoundError, FileNotFoundError):
-            # community_backends directory or yaml file does not exist
-            logger.debug(
-                "Community backends directory or file not found, skipping initialization"
-            )
-        except Exception as e:
-            logger.error(f"Failed to initialize community backends: {e}")
-
-    async def _upsert_community_backend(self, session: AsyncSession, config: dict):
-        """Create or update a community backend from YAML configuration."""
-        backend_name = config.get("backend_name")
-        if not backend_name:
-            return
-
-        # Prepare backend data
-        allowed_keys = [
-            "backend_name",
-            "version_configs",
-            "default_version",
-            "default_backend_param",
-            "default_run_command",
-            "default_entrypoint",
-            "health_check_path",
-            "description",
-            "icon",
-            "default_environment",
-        ]
-        backend_data = {k: config[k] for k in allowed_keys if k in config}
-
-        # Set backend source
-        backend_data["backend_source"] = BackendSourceEnum.COMMUNITY
-        backend_data["enabled"] = False
-
-        # Convert version_configs to VersionConfigDict
-        if 'version_configs' in backend_data and backend_data['version_configs']:
-            backend_data['version_configs'] = VersionConfigDict(
-                root={
-                    version: VersionConfig(**ver_config)
-                    for version, ver_config in backend_data['version_configs'].items()
-                }
-            )
-
-        # Upsert: update if exists, create if not
-        existing = await InferenceBackend.one_by_field(
-            session, "backend_name", backend_name
-        )
-        if existing:
-            await existing.update(session, backend_data)
-        else:
-            backend = InferenceBackend(**backend_data)
-            await InferenceBackend.create(session, backend)
