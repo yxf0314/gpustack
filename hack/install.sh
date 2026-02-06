@@ -82,7 +82,7 @@ function make_community_backends() {
 
   # Build the community backends
   (
-    cd "${tmp_dir}" && uv venv && uv pip install PyYAML && uv run make
+    cd "${tmp_dir}" && uv venv && source .venv/bin/activate && uv pip install PyYAML && uv run make
   )
 
   # Create target directory and copy the yaml file
