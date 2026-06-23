@@ -112,6 +112,45 @@ def find_bool_parameter(parameters: List[str], param_names: List[str]) -> bool:
     return False
 
 
+def subordinates_serve_api(backend_parameters: Optional[List[str]]) -> bool:
+    """Whether each subordinate worker of a distributed vLLM DP deployment runs
+    its own API server (non-headless) and must be registered as an independent
+    gateway backend.
+
+    True for hybrid-LB (``--data-parallel-hybrid-lb``), external-LB
+    (``--data-parallel-external-lb``), and when the user pins
+    ``--data-parallel-rank`` (vLLM implicitly enables external-LB then). False
+    for internal-LB, where followers carry ``--headless`` and only the leader
+    serves. ``--data-parallel-rank`` is matched by presence rather than
+    ``find_bool_parameter`` because a literal rank ``0`` is a falsy value.
+    """
+    return (
+        find_bool_parameter(backend_parameters, ["data-parallel-hybrid-lb"])
+        or find_bool_parameter(backend_parameters, ["data-parallel-external-lb"])
+        or find_parameter(backend_parameters, ["data-parallel-rank"]) is not None
+    )
+
+
+def resolve_data_parallel_load_balance_mode(
+    backend_parameters: Optional[List[str]],
+) -> str:
+    """Resolve the effective vLLM data-parallel load-balance mode from the
+    user-supplied backend parameters.
+
+    ``--data-parallel-hybrid-lb`` -> ``"hybrid"``; ``--data-parallel-external-lb``
+    or a pinned ``--data-parallel-rank`` -> ``"external"`` (vLLM implies
+    external-LB then). Defaults to ``"internal"``.
+    """
+    if find_bool_parameter(backend_parameters, ["data-parallel-hybrid-lb"]):
+        return "hybrid"
+    if (
+        find_bool_parameter(backend_parameters, ["data-parallel-external-lb"])
+        or find_parameter(backend_parameters, ["data-parallel-rank"]) is not None
+    ):
+        return "external"
+    return "internal"
+
+
 def get_versioned_command(command_name: str, version: str) -> str:
     """
     Get the versioned command name.

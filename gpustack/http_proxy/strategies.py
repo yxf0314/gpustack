@@ -33,3 +33,30 @@ class RoundRobinStrategy(LoadBalancingStrategy):
             self._instance_lists[model_id] = instances
 
         return next(self._iterators[model_id])
+
+
+class WorkerRoundRobinStrategy:
+    """Round-robins over the worker ids serving a single model instance.
+
+    Used for vLLM hybrid-LB / external-LB, where the leader and every subordinate
+    expose their own API, so one logical instance spans several serving
+    endpoints. Keyed by instance id; the cycle resets when the worker set changes
+    (scale up/down or a worker dropping out). This is orthogonal to
+    RoundRobinStrategy, which balances across the replicas (instances) of a model.
+    """
+
+    def __init__(self):
+        self._iterators: Dict[int, itertools.cycle] = {}
+        self._worker_id_lists: Dict[int, List[int]] = {}
+
+    def select_worker_id(self, instance_id: int, worker_ids: List[int]) -> int:
+        if len(worker_ids) == 0:
+            raise Exception("No worker ids available")
+        if (
+            instance_id not in self._iterators
+            or self._worker_id_lists[instance_id] != worker_ids
+        ):
+            self._iterators[instance_id] = itertools.cycle(worker_ids)
+            self._worker_id_lists[instance_id] = list(worker_ids)
+
+        return next(self._iterators[instance_id])

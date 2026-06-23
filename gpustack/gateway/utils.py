@@ -44,6 +44,7 @@ from gpustack.gateway.client.networking_istio_io_v1alpha3_api import (
 from gpustack.schemas.models import (
     ModelInstance,
     ModelInstancePublic,
+    ModelInstanceSubordinateWorker,
 )
 from gpustack.schemas.model_provider import (
     ModelProvider,
@@ -781,23 +782,111 @@ def hamilton_calculate_weight(
     return [info['floor_quota'] for info in instances_info]
 
 
+def model_instance_subordinate_registry(
+    model_instance: Union[ModelInstance, ModelInstancePublic],
+    subordinate_worker: ModelInstanceSubordinateWorker,
+    index: int,
+    subordinate_worker_obj: Optional[Worker] = None,
+    name_suffix: Optional[str] = None,
+) -> Optional[McpBridgeRegistry]:
+    """Build a registry for a subordinate worker that serves its own API
+    (hybrid-LB / external-LB). The ``-sub{index}`` suffix keeps it a distinct
+    Higress upstream while
+    ``get_instance_id_from_header`` still parses the instance id (the regex
+    treats it as an alias segment). Address selection mirrors the leader and
+    branches on the subordinate's own proxy mode.
+    """
+    name = f"{model_instance_prefix(model_instance)}-sub{index}"
+    if name_suffix:
+        name = f"{name}-{name_suffix}"
+    if subordinate_worker_obj is not None:
+        if subordinate_worker_obj.proxy_mode == ModelInstanceProxyModeEnum.WORKER:
+            return _worker_reserve_proxy_registry(subordinate_worker_obj, name)
+        if subordinate_worker_obj.proxy_mode == ModelInstanceProxyModeEnum.TUNNEL:
+            return _worker_tunnel_proxy_registry(subordinate_worker_obj, name)
+    # DIRECT (or no worker info): connect straight to the follower vLLM. Every
+    # node serves on the same port number (ports[0]) bound to its own worker IP.
+    address = subordinate_worker.worker_ip
+    port = model_instance.ports[0] if model_instance.ports else model_instance.port
+    if address is None or address == "" or port is None:
+        return None
+    if is_ipaddress(address):
+        return McpBridgeRegistry(
+            domain=f"{address}:{port}",
+            port=80,
+            name=name,
+            protocol="http",
+            type="static",
+        )
+    return McpBridgeRegistry(
+        domain=address, port=port, name=name, protocol="http", type="dns"
+    )
+
+
+def instance_registries(
+    model_instance: Union[ModelInstance, ModelInstancePublic],
+    leader_worker: Optional[Worker] = None,
+    workers: Optional[Dict[int, Worker]] = None,
+    subordinates_serve: bool = False,
+    name_suffix: Optional[str] = None,
+) -> List[McpBridgeRegistry]:
+    """All gateway registries for one instance: the leader, plus each subordinate
+    that serves its own API (hybrid-LB / external-LB). When subordinates don't
+    serve, followers stay headless and are not registered, so they never receive
+    routed traffic.
+    """
+    registries: List[McpBridgeRegistry] = []
+    leader = model_instance_registry(
+        model_instance, worker=leader_worker, name_suffix=name_suffix
+    )
+    if leader is not None:
+        registries.append(leader)
+    if (
+        subordinates_serve
+        and model_instance.distributed_servers
+        and model_instance.distributed_servers.subordinate_workers
+    ):
+        for index, subordinate_worker in enumerate(
+            model_instance.distributed_servers.subordinate_workers
+        ):
+            subordinate_worker_obj = (
+                (workers or {}).get(subordinate_worker.worker_id)
+                if subordinate_worker.worker_id
+                else None
+            )
+            registry = model_instance_subordinate_registry(
+                model_instance,
+                subordinate_worker,
+                index,
+                subordinate_worker_obj=subordinate_worker_obj,
+                name_suffix=name_suffix,
+            )
+            if registry is not None:
+                registries.append(registry)
+    return registries
+
+
 def model_instances_registry_list(
     model_instances: List[Union[ModelInstance, ModelInstancePublic]],
     workers: Optional[Dict[int, Worker]] = None,
     downstream_model_name: Optional[str] = None,
     registry_name_suffix: Optional[str] = None,
+    subordinates_serve: bool = False,
 ) -> DestinationTupleList:
     registries: DestinationTupleList = []
     for model_instance in model_instances:
-        worker = (
+        leader_worker = (
             (workers or {}).get(model_instance.worker_id)
             if model_instance.worker_id
             else None
         )
-        registry = model_instance_registry(
-            model_instance, worker=worker, name_suffix=registry_name_suffix
-        )
-        if registry is not None:
+        for registry in instance_registries(
+            model_instance,
+            leader_worker=leader_worker,
+            workers=workers,
+            subordinates_serve=subordinates_serve,
+            name_suffix=registry_name_suffix,
+        ):
             registries.append(
                 (1, downstream_model_name or model_instance.model_name, registry)
             )
@@ -1046,6 +1135,7 @@ async def ensure_model_mcp_bridge(
     cluster_id: int,
     workers: Optional[Dict[int, Worker]] = None,
     lora_route_names: Optional[List[str]] = None,
+    subordinates_serve: bool = False,
 ) -> List[McpBridgeRegistry]:
     desired_registry: List[McpBridgeRegistry] = []
     to_delete_prefix: Optional[str] = model_prefix(model_id)
@@ -1057,17 +1147,21 @@ async def ensure_model_mcp_bridge(
     ]
     if event_type != EventType.DELETED:
         for model_instance in model_instances:
-            worker = (
+            leader_worker = (
                 (workers or {}).get(model_instance.worker_id)
                 if model_instance.worker_id
                 else None
             )
             for name_suffix in name_suffixes:
-                registry = model_instance_registry(
-                    model_instance, worker=worker, name_suffix=name_suffix
+                desired_registry.extend(
+                    instance_registries(
+                        model_instance,
+                        leader_worker=leader_worker,
+                        workers=workers,
+                        subordinates_serve=subordinates_serve,
+                        name_suffix=name_suffix,
+                    )
                 )
-                if registry is not None:
-                    desired_registry.append(registry)
     await ensure_mcp_bridge(
         client=networking_higress_api,
         namespace=namespace,

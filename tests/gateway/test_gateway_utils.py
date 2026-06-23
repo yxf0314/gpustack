@@ -11,13 +11,20 @@ from gpustack.gateway.utils import (
     generate_model_ingress,
     generic_proxy_router_diff_spec,
     get_instance_id_from_header,
+    instance_registries,
     lora_registry_name_suffix,
     model_instance_registry,
     model_instances_registry_list,
     provider_registry,
     router_header_key,
 )
-from gpustack.schemas.models import ModelInstance
+from gpustack.schemas.config import ModelInstanceProxyModeEnum
+from gpustack.schemas.models import (
+    DistributedServers,
+    ModelInstance,
+    ModelInstanceSubordinateWorker,
+)
+from gpustack.schemas.workers import Worker
 from gpustack.gateway.client.extensions_higress_io_v1_api import WasmPluginSpec
 from gpustack.schemas.model_provider import (
     ModelProvider,
@@ -519,3 +526,67 @@ def test_model_instances_registry_list_threads_suffix():
         f"model-5-1-{suffix}",
         f"model-5-2-{suffix}",
     ]
+
+
+def _hybrid_lb_instance(subordinate_ips):
+    """Hybrid-LB distributed instance: leader + N subordinate workers, all
+    serving on ports[0] (8000) bound to their own worker IP."""
+    instance = ModelInstance(id=12, model_id=5, worker_ip="10.0.0.1", port=8000)
+    instance.ports = [8000, 8001, 8002, 8003]
+    instance.distributed_servers = DistributedServers(
+        subordinate_workers=[
+            ModelInstanceSubordinateWorker(worker_id=100 + i, worker_ip=ip)
+            for i, ip in enumerate(subordinate_ips)
+        ],
+    )
+    return instance
+
+
+def test_instance_registries_hybrid_lb_direct_registers_each_node():
+    instance = _hybrid_lb_instance(["10.0.0.2", "10.0.0.3"])
+    registries = instance_registries(instance, subordinates_serve=True)
+    # One registry per node: leader + each subordinate as a distinct upstream.
+    assert [r.name for r in registries] == [
+        "model-5-12",
+        "model-5-12-sub0",
+        "model-5-12-sub1",
+    ]
+    # DIRECT addressing: each node reachable at its own IP on the shared port.
+    assert [r.domain for r in registries] == [
+        "10.0.0.1:8000",
+        "10.0.0.2:8000",
+        "10.0.0.3:8000",
+    ]
+    assert all(r.type == "static" for r in registries)
+
+
+def test_instance_registries_non_hybrid_skips_subordinates():
+    instance = _hybrid_lb_instance(["10.0.0.2"])
+    registries = instance_registries(instance, subordinates_serve=False)
+    # Non-serving followers stay headless: only the leader is registered.
+    assert [r.name for r in registries] == ["model-5-12"]
+
+
+def test_instance_registries_subordinate_uses_its_own_proxy_mode():
+    instance = _hybrid_lb_instance(["10.0.0.2"])
+    sub_worker = Worker(
+        id=100,
+        name="worker-100",
+        ip="10.0.0.2",
+        port=10150,
+        proxy_mode=ModelInstanceProxyModeEnum.WORKER,
+    )
+    registries = instance_registries(
+        instance, subordinates_serve=True, workers={100: sub_worker}
+    )
+    sub = registries[1]
+    assert sub.name == "model-5-12-sub0"
+    # WORKER proxy mode routes to the subordinate worker's agent, not vLLM directly.
+    assert sub.domain == "10.0.0.2:10150"
+
+
+def test_get_instance_id_from_header_subordinate_alias():
+    # The -sub<idx> suffix must not break instance-id parsing (treated as alias).
+    assert (
+        get_instance_id_from_header({router_header_key: "model-5-12-sub0.static"}) == 12
+    )

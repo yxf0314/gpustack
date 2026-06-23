@@ -25,8 +25,10 @@ from gpustack.api.exceptions import (
 from gpustack.api.responses import StreamingResponseWithStatusCode
 from gpustack import envs
 from gpustack.http_proxy.load_balancer import LoadBalancer
+from gpustack.http_proxy.strategies import WorkerRoundRobinStrategy
+from gpustack.utils.command import subordinates_serve_api
 from gpustack.routes.model_common import build_category_conditions
-from gpustack.schemas.models import Model
+from gpustack.schemas.models import Model, ModelInstance
 from gpustack.schemas.model_routes import (
     ModelRoute,
     MyModel,
@@ -56,6 +58,35 @@ from gpustack.gateway.utils import (
 logger = logging.getLogger(__name__)
 
 load_balancer = LoadBalancer()
+# Balances across the serving endpoints (leader + subordinates) of a single
+# vLLM instance whose subordinates serve their own API (hybrid-LB / external-LB),
+# mirroring the Higress gateway path. Other instances always resolve to their
+# single leader endpoint.
+subordinate_worker_balancer = WorkerRoundRobinStrategy()
+
+
+def _select_serving_worker_id(instance: ModelInstance, model: Model) -> int:
+    """Pick which worker's agent should receive the request for this instance.
+
+    When a vLLM instance's subordinates serve their own API (hybrid-LB /
+    external-LB) every node serves its own API, so round-robin across the leader
+    and subordinate workers. The routing header stays instance-scoped; each
+    worker resolves its own local serving port. For any other instance this is
+    just the leader worker.
+    """
+    subordinate_workers = (
+        instance.distributed_servers.subordinate_workers
+        if instance.distributed_servers
+        else None
+    )
+    if not (subordinate_workers and subordinates_serve_api(model.backend_parameters)):
+        return instance.worker_id
+    worker_ids = [instance.worker_id] + [
+        subordinate_worker.worker_id
+        for subordinate_worker in subordinate_workers
+        if subordinate_worker.worker_id
+    ]
+    return subordinate_worker_balancer.select_worker_id(instance.id, worker_ids)
 
 
 # Endpoints served by a dedicated server router (e.g. rerank.router), so the
@@ -234,10 +265,11 @@ async def proxy_request_by_model(
         instance = await get_running_instance(
             session, model.id, target.overridden_model_name
         )
-        worker: Worker = await WorkerService(session).get_by_id(instance.worker_id)
+        serving_worker_id = _select_serving_worker_id(instance, model)
+        worker: Worker = await WorkerService(session).get_by_id(serving_worker_id)
         if not worker:
             raise InternalServerErrorException(
-                message=f"Worker with ID {instance.worker_id} not found",
+                message=f"Worker with ID {serving_worker_id} not found",
                 is_openai_exception=True,
             )
     extra_headers = {

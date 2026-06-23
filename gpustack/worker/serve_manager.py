@@ -35,7 +35,7 @@ from gpustack.schemas.inference_backend import (
 from gpustack.utils import network
 from gpustack.utils.convert import safe_int
 from gpustack.utils.attrs import set_attr
-from gpustack.utils.command import find_int_parameter
+from gpustack.utils.command import subordinates_serve_api, find_int_parameter
 from gpustack.utils.process import terminate_process_tree, add_signal_handlers
 from gpustack.worker.backends.ascend_mindie import AscendMindIEServer
 from gpustack.worker.backends.sglang import SGLangServer
@@ -598,10 +598,16 @@ class ServeManager:
         """
 
         # Use the event-driven local cache instead of an API call.
+        # Only the owning (leader / non-distributed) worker runs the active
+        # inference health check. Subordinates that serve their own API
+        # (hybrid-LB / external-LB) now live in this map too, but mi.worker_ip/
+        # mi.port point at the leader, so a subordinate would otherwise
+        # health-check the leader instead of its own endpoint.
         model_instances = [
             mi
             for mi in self._model_instance_by_instance_id.values()
             if mi.state == ModelInstanceStateEnum.RUNNING
+            and mi.worker_id == self._worker_id
         ]
         if not model_instances:
             return
@@ -725,6 +731,20 @@ class ServeManager:
             )
             if not joined:
                 return
+
+            # Subordinates that serve their own API (hybrid-LB / external-LB)
+            # have no --headless, so the server's proxy/gateway may route
+            # inference traffic here. Track the instance in the by-id map so the
+            # routing header resolves to this worker's local serving port via
+            # get_instance_port_by_model_instance_id (ports[0] is the same number
+            # on every node, each bound to its own worker IP). Other distributed
+            # followers stay headless and out of the map so they never receive
+            # direct traffic.
+            follower_model = self._get_model(mi)
+            if follower_model and subordinates_serve_api(
+                follower_model.backend_parameters
+            ):
+                self._model_instance_by_instance_id[mi.id] = mi
             # Return if the main worker isn't initialized.
             if (
                 mi.distributed_servers.mode
@@ -1545,6 +1565,11 @@ class ServeManager:
         instance = self._model_instance_by_instance_id.get(
             model_instance_id
         )  # Ensure the model instance is cached.
+        # ports[0] is the serving port and carries the same number on every node
+        # of a distributed instance (each bound to its own worker IP), so this
+        # resolves correctly whether this worker hosts the leader or an
+        # API-serving subordinate (hybrid-LB / external-LB) — the worker proxy
+        # forwards to this worker's own IP:port.
         return (
             instance.ports[0]
             if instance and instance.state == ModelInstanceStateEnum.RUNNING
