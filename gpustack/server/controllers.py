@@ -117,6 +117,7 @@ from gpustack.server.bus import Event, EventType, event_bus
 from gpustack.server.cache import delete_cache_by_key
 from gpustack.utils.model_source import get_draft_model_source
 from gpustack.utils.command import subordinates_serve_api
+from gpustack.policies.utils import manual_distributed_enabled
 from gpustack import envs
 from gpustack.server.db import async_session
 from gpustack.server.services import (
@@ -188,6 +189,18 @@ class ModelController:
         self, session: AsyncSession, event_type: EventType, model: Model
     ):
         if self._disable_gateway:
+            return
+        if manual_distributed_enabled(model):
+            # Manual-distributed models manage gateway/LB externally; clear any
+            # previously-registered upstreams (avoid orphans) and skip registration.
+            await mcp_handler.ensure_model_mcp_bridge(
+                event_type=EventType.DELETED,
+                model_id=model.id,
+                model_instances=[],
+                networking_higress_api=self._higress_network_api,
+                namespace=self._config.gateway_namespace,
+                cluster_id=model.cluster_id,
+            )
             return
         model_instances = await ModelInstance.all_by_fields(
             session,
@@ -1256,6 +1269,9 @@ async def calculate_model_destinations(
     becomes a self-map (skipped at sync_model_route_mapper), letting the
     LoRA module name reach vLLM intact.
     """
+    if manual_distributed_enabled(model):
+        # Opt out of gateway routing; the user manages the LB externally.
+        return []
     downstream_model_name = overridden_model_name or model.name
     # LoRA targets share the base model's instances; route them to a per-LoRA
     # aliased service (same address, distinct name) registered in ensure_model_mcp_bridge
