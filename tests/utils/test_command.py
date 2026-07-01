@@ -6,6 +6,7 @@ from gpustack.utils.command import (
     find_parameter,
     find_bool_parameter,
     subordinates_serve_api,
+    parse_bool_env,
     resolve_executor_backend,
     resolve_data_parallel_load_balance_mode,
     get_versioned_command,
@@ -475,3 +476,25 @@ def test_resolve_executor_backend(parameters, backend_version, expected):
 )
 def test_resolve_data_parallel_load_balance_mode(parameters, expected):
     assert resolve_data_parallel_load_balance_mode(parameters) == expected
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("1", True),
+        ("true", True),
+        ("YES", True),
+        ("On", True),
+        # Shares find_bool_parameter's vocabulary, so single-letter forms count.
+        ("t", True),
+        ("y", True),
+        (" true ", True),
+        ("0", False),
+        ("false", False),
+        ("nope", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_parse_bool_env(value, expected):
+    assert parse_bool_env(value) is expected

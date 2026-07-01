@@ -112,6 +112,16 @@ def find_bool_parameter(parameters: List[str], param_names: List[str]) -> bool:
     return False
 
 
+def parse_bool_env(value: Optional[str]) -> bool:
+    """Parse a truthy environment-variable value, sharing the same vocabulary as
+    backend-parameter bool parsing (``1``/``true``/``yes``/``on``/``t``/``y``).
+    ``None``/empty/unrecognized -> False.
+    """
+    if value is None:
+        return False
+    return str(value).strip().lower() in _TRUTHY_VALUES
+
+
 def subordinates_serve_api(backend_parameters: Optional[List[str]]) -> bool:
     """Whether each subordinate worker runs its own API server (non-headless) and
     must be registered as an independent gateway backend. True for any non-internal

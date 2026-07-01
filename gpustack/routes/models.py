@@ -68,6 +68,7 @@ from gpustack.server.lora_model_routes import (
     is_lora_list_stale,
 )
 from gpustack.utils.command import find_parameter
+from gpustack.policies.utils import manual_distributed_from_env
 from gpustack.utils.convert import safe_int
 from gpustack.utils.gpu import parse_gpu_id
 from gpustack.routes.model_common import (
@@ -308,6 +309,22 @@ async def validate_model_in(
 ):
     if model_in.gpu_selector is not None and model_in.replicas > 0:
         await validate_gpu_ids(session, model_in, cluster_id=cluster_id)
+
+    # Manual-distributed registers no gateway upstream, so an enabled model route
+    # would resolve to empty destinations (gateway returns 503). Require it
+    # explicitly disabled. ModelUpdate has no such field, so skip when absent.
+    if (
+        hasattr(model_in, "enable_model_route")
+        and manual_distributed_from_env(model_in.env)
+        and model_in.enable_model_route is not False
+    ):
+        raise BadRequestException(
+            message=(
+                "GPUSTACK_MANUAL_DISTRIBUTED requires enable_model_route=false; "
+                "GPUStack registers no upstream for a manual-distributed model and "
+                "the model route would otherwise resolve to empty destinations."
+            )
+        )
 
     if is_custom_backend(model_in.backend):
         logger.info("Skip model validation for custom backend")
@@ -678,6 +695,23 @@ async def update_model(
     assert_resource_visible(ctx, model, not_found_message="Model not found")
 
     await validate_model_in(session, model_in)
+
+    # On update env may be omitted, so use the effective env (incoming replaces,
+    # else persisted) — model_in.env alone misses an already-persisted
+    # GPUSTACK_MANUAL_DISTRIBUTED. Reject if a base route still exists; it would
+    # resolve to empty destinations.
+    effective_env = model_in.env if model_in.env is not None else model.env
+    if manual_distributed_from_env(effective_env):
+        base_route = await ModelRoute.one_by_field(session, "name", model.name)
+        if base_route:
+            raise BadRequestException(
+                message=(
+                    f"Model route '{model.name}' must be deleted before enabling "
+                    "GPUSTACK_MANUAL_DISTRIBUTED; GPUStack registers no upstream "
+                    "for a manual-distributed model and the route would otherwise "
+                    "resolve to empty destinations."
+                )
+            )
 
     if model_in.backend != BackendEnum.CUSTOM.value and (
         model.run_command or model.image_name
