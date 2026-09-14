@@ -1,19 +1,58 @@
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import pytest_asyncio
+import yaml
+from fastapi import Response
+from sqlalchemy import delete, func
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from gpustack.api.exceptions import (
     AlreadyExistsException,
+    BadRequestException,
     ForbiddenException,
     NotFoundException,
 )
 from gpustack.api.tenant import TenantContext
 from gpustack.routes import models as models_route
-from gpustack.routes.models import create_model, update_model
+from gpustack.routes.models import (
+    create_model,
+    export_models,
+    import_models,
+    update_model,
+)
 from gpustack.routes.model_common import ModelStateFilterEnum
-from gpustack.schemas.models import ModelCreate, ModelUpdate, SourceEnum
-from gpustack.schemas.principals import PrincipalType, platform_principal_id
+from gpustack.schemas.clusters import Cluster
+from gpustack.schemas.deployment_document import (
+    DeploymentExportRequest,
+    DeploymentImportRequest,
+    dump_deployments,
+    load_deployments,
+)
+from gpustack.schemas.links import ModelRoutePrincipalLink
+from gpustack.schemas.model_routes import (
+    AccessPolicyEnum,
+    ModelRoute,
+    ModelRouteTarget,
+)
+from gpustack.schemas.models import (
+    GPUSelector,
+    LoraListEntry,
+    Model,
+    ModelCreate,
+    ModelUpdate,
+    SourceEnum,
+)
+from gpustack.schemas.principals import (
+    Principal,
+    PrincipalType,
+    platform_principal_id,
+)
+from gpustack.utils.export_limits import attachment_headers
 
 DEFAULT_ORG_ID = platform_principal_id()
 CUSTOM_ORG_ID = 5
@@ -318,3 +357,481 @@ async def test_update_model_rejects_gpu_selector_on_vgpu_model(monkeypatch):
                 ),
             ),
         )
+
+
+# ==================== Deployment YAML export / import ====================
+#
+# The document schema (what an exported entry carries, how strictly it reads
+# back) and the two routes, the latter against an in-memory SQLite database
+# with the handlers driven directly through a ``TenantContext``.
+
+EXPORTED_AT = datetime(2026, 9, 7, 10, 0, 0, tzinfo=timezone.utc)
+
+TABLES = (
+    Principal.__table__,
+    Cluster.__table__,
+    Model.__table__,
+    ModelRoute.__table__,
+    ModelRouteTarget.__table__,
+    ModelRoutePrincipalLink.__table__,
+)
+
+# What a user would hand-write: a routed base model with a LoRA, explicit GPU
+# placement and a credential, plus a plain embedding model.
+DOCUMENT = """
+deployments:
+- name: qwen3-8b
+  source: huggingface
+  huggingface_repo_id: Qwen/Qwen3-8B
+  backend: vLLM
+  backend_parameters:
+  - --max-model-len=32768
+  env:
+    HF_TOKEN: hf_xxx
+  gpu_selector:
+    gpu_ids:
+    - worker-1:cuda:0
+  lora_list:
+  - lora_name: sql
+    lora_repo_name: org/sql-lora
+  enable_model_route: true
+- name: bge-m3
+  source: huggingface
+  huggingface_repo_id: BAAI/bge-m3
+  replicas: 2
+"""
+
+
+def _model_row(
+    name, cluster_id=1, owner_principal_id=DEFAULT_ORG_ID, **fields
+) -> Model:
+    fields.setdefault("source", SourceEnum.HUGGING_FACE)
+    fields.setdefault("huggingface_repo_id", f"org/{name}")
+    return Model(
+        name=name,
+        cluster_id=cluster_id,
+        owner_principal_id=owner_principal_id,
+        **fields,
+    )
+
+
+def _exported_row(**overrides) -> Model:
+    """A fully configured row with every server-derived field set, so the dump
+    tests can check that none of those leak into the document."""
+    fields = dict(
+        id=7,
+        name="qwen3-8b",
+        huggingface_repo_id="Qwen/Qwen3-8B",
+        backend="vLLM",
+        backend_version="0.11.0",
+        backend_parameters=["--max-model-len=32768"],
+        env={"HF_TOKEN": "hf_xxx"},
+        gpu_selector=GPUSelector(gpu_ids=["worker-1:cuda:0"]),
+        lora_list=[
+            LoraListEntry(
+                lora_name="qwen3-8b:sql",
+                lora_repo_name="org/sql-lora",
+                path="/var/lib/gpustack/cache/sql",
+                model_file_id=9,
+            )
+        ],
+        meta={"n_params": 8_000_000_000},
+        ready_replicas=1,
+        cluster_id=3,
+        owner_principal_id=CUSTOM_ORG_ID,
+        access_policy=AccessPolicyEnum.ALLOWED_PRINCIPALS,
+        created_at=datetime(2026, 1, 1),
+        updated_at=datetime(2026, 1, 2),
+    )
+    fields.update(overrides)
+    return _model_row(fields.pop("name"), **fields)
+
+
+def test_dump_keeps_user_input_and_drops_server_state():
+    text = dump_deployments(
+        [_exported_row()], route_backed_ids={7}, exported_at=EXPORTED_AT
+    )
+
+    assert text.startswith("# Exported from GPUStack v")
+    assert "at 2026-09-07T10:00:00Z\n" in text
+    document = yaml.safe_load(text)
+    assert list(document) == ["deployments"]
+    (entry,) = document["deployments"]
+
+    # ``name`` leads, everything else keeps the schema's declaration order.
+    assert list(entry)[:3] == ["name", "source", "huggingface_repo_id"]
+    assert list(entry)[-1] == "enable_model_route"
+    assert entry["enable_model_route"] is True
+    assert entry["backend_version"] == "0.11.0"
+    assert entry["backend_parameters"] == ["--max-model-len=32768"]
+    assert entry["env"] == {"HF_TOKEN": "hf_xxx"}
+    assert entry["gpu_selector"] == {"gpu_ids": ["worker-1:cuda:0"]}
+    assert entry["lora_list"] == [
+        {"lora_name": "sql", "lora_repo_name": "org/sql-lora", "source": "huggingface"}
+    ]
+
+    for field in (
+        "id",
+        "created_at",
+        "updated_at",
+        "ready_replicas",
+        "meta",
+        "cluster_id",
+        "owner_principal_id",
+        "access_policy",
+    ):
+        assert field not in entry, field
+    # ``None`` never round-trips into an explicit null.
+    assert "description" not in entry
+    assert "worker_selector" in entry  # an empty dict is user input, kept
+
+
+def test_dump_is_byte_stable_and_infers_the_route_flag_per_model():
+    models = [_exported_row(), _exported_row(id=8, name="second", lora_list=None)]
+
+    first = dump_deployments(models, route_backed_ids={7}, exported_at=EXPORTED_AT)
+    second = dump_deployments(models, route_backed_ids={7}, exported_at=EXPORTED_AT)
+    assert first == second
+
+    flags = [
+        entry["enable_model_route"] for entry in yaml.safe_load(first)["deployments"]
+    ]
+    assert flags == [True, False]
+
+
+@pytest.mark.parametrize(
+    "text, message",
+    [
+        ("- just\n- a list\n", "must be a mapping"),
+        ("deployments: {}\n", "'deployments' must be a list"),
+        ("deployments: []\nversion: 1\n", "unknown top-level field(s): version"),
+        ("deployments: [\n", "not valid YAML"),
+    ],
+)
+def test_load_rejects_a_malformed_document_outright(text, message):
+    with pytest.raises(ValueError) as raised:
+        load_deployments(text)
+    assert message in str(raised.value)
+
+
+def test_load_reports_every_entry_problem_and_keeps_the_good_entries():
+    text = """
+deployments:
+- name: good
+  source: huggingface
+  huggingface_repo_id: org/good
+  .anchor: &shared {}
+- name: broken
+  source: huggingface
+  huggingface_repo_id: org/broken
+  replicas: -1
+  colour: red
+  id: 12
+  cluster_id: 3
+  gpu_selector:
+    gpu_ids: [worker-1:cuda:0]
+    typo: 1
+  lora_list:
+  - lora_name: sql
+    lora_repo_name: org/sql-lora
+    colour: red
+    path: /var/lib/gpustack/cache/sql
+- name: good
+  source: huggingface
+  huggingface_repo_id: org/again
+- not a mapping
+"""
+    loaded = load_deployments(text)
+
+    assert [(index, entry.name) for index, entry in loaded.entries] == [(0, "good")]
+    # The schema error keeps pydantic's own text; only its label is ours.
+    assert loaded.errors[2].startswith("deployments[1] (broken): replicas: ")
+    assert loaded.errors[:2] + loaded.errors[3:] == [
+        "deployments[1] (broken): server-managed field(s) are not allowed: "
+        "cluster_id, id, lora_list[0].path",
+        "deployments[1] (broken): unknown field(s): colour, gpu_selector.typo, "
+        "lora_list[0].colour",
+        "deployments[2] (good): duplicate name, already used by deployments[0]",
+        "deployments[3]: must be a mapping",
+    ]
+
+
+def test_attachment_header_fallback_stays_a_well_formed_quoted_string():
+    header = attachment_headers('模型"x.yaml')["Content-Disposition"]
+    assert header == (
+        'attachment; filename="___x.yaml"; '
+        "filename*=UTF-8''%E6%A8%A1%E5%9E%8B%22x.yaml"
+    )
+
+
+@pytest_asyncio.fixture
+async def engine():
+    e = create_async_engine("sqlite+aiosqlite://")
+    async with e.begin() as conn:
+        for table in TABLES:
+            await conn.run_sync(table.create)
+    yield e
+    await e.dispose()
+
+
+@pytest.fixture
+def no_gpu_lookup(monkeypatch):
+    """``gpu_selector`` validation needs live workers; placement is not under test."""
+    monkeypatch.setattr("gpustack.routes.models.validate_gpu_ids", AsyncMock())
+
+
+async def _seed(session: AsyncSession, *rows):
+    session.add_all(rows)
+    await session.commit()
+    return rows
+
+
+async def _count(session: AsyncSession, table) -> int:
+    return (await session.exec(select(func.count()).select_from(table))).one()
+
+
+async def _route_names(session: AsyncSession):
+    return sorted(route.name for route in await ModelRoute.all_by_fields(session))
+
+
+def _entries(response):
+    assert response.media_type == "application/x-yaml"
+    return yaml.safe_load(response.body)["deployments"]
+
+
+def _body_without_header(response) -> str:
+    return response.body.decode().split("\n", 1)[1]
+
+
+async def _import(session, ctx, content, cluster_id=1, dry_run=False):
+    response = Response()
+    result = await import_models(
+        session,
+        ctx,
+        DeploymentImportRequest(
+            content=content, cluster_id=cluster_id, dry_run=dry_run
+        ),
+        response,
+    )
+    return response.status_code, result
+
+
+@pytest.mark.asyncio
+async def test_export_scopes_to_the_caller_and_names_the_file(engine):
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        first, second, foreign = await _seed(
+            session,
+            _model_row("first", env={"HF_TOKEN": "hf_xxx"}),
+            _model_row("second", cluster_id=2),
+            _model_row("foreign", owner_principal_id=CUSTOM_ORG_ID),
+        )
+        await _seed(
+            session,
+            ModelRoute(name="first", created_model_id=first.id),
+            # A LoRA child route also points at its base model; without the
+            # primary route the flag must stay off.
+            ModelRoute(name="second:sql", created_model_id=second.id),
+        )
+
+        # Everything the Org can see, in id order; the route flag is inferred.
+        response = await export_models(
+            session, _ctx(DEFAULT_ORG_ID), DeploymentExportRequest()
+        )
+        entries = _entries(response)
+        assert [entry["name"] for entry in entries] == ["first", "second"]
+        assert [entry["enable_model_route"] for entry in entries] == [True, False]
+        assert entries[0]["env"] == {"HF_TOKEN": "hf_xxx"}
+        assert "cluster_id" not in entries[0]
+        assert response.headers["content-disposition"].startswith(
+            'attachment; filename="gpustack-deployments-'
+        )
+
+        # ``cluster_id`` narrows; a single model is named after itself.
+        response = await export_models(
+            session, _ctx(DEFAULT_ORG_ID), DeploymentExportRequest(cluster_id=2)
+        )
+        assert [entry["name"] for entry in _entries(response)] == ["second"]
+        assert (
+            response.headers["content-disposition"]
+            == 'attachment; filename="second.yaml"'
+        )
+
+        # A cross-tenant or unknown id is 404 with no partial result; the
+        # platform admin in "All" mode sees every Org.
+        with pytest.raises(NotFoundException):
+            await export_models(
+                session,
+                _ctx(DEFAULT_ORG_ID),
+                DeploymentExportRequest(ids=[first.id, foreign.id]),
+            )
+        with pytest.raises(NotFoundException):
+            await export_models(
+                session, _ctx(DEFAULT_ORG_ID), DeploymentExportRequest(ids=[9999])
+            )
+        response = await export_models(
+            session,
+            _ctx(None, is_admin=True),
+            DeploymentExportRequest(ids=[foreign.id, second.id]),
+        )
+        assert [entry["name"] for entry in _entries(response)] == [
+            "second",
+            "foreign",
+        ]
+
+        # A name with shell/quote characters still yields a well-formed header.
+        (odd,) = await _seed(session, _model_row('odd"name/v1'))
+        response = await export_models(
+            session, _ctx(DEFAULT_ORG_ID), DeploymentExportRequest(ids=[odd.id])
+        )
+        assert (
+            response.headers["content-disposition"]
+            == 'attachment; filename="odd_name_v1.yaml"'
+        )
+
+
+@pytest.mark.asyncio
+async def test_import_round_trips_an_export(engine, no_gpu_lookup):
+    ctx = _ctx(DEFAULT_ORG_ID)
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        await _seed(
+            session, Cluster(id=1, name="c1", owner_principal_id=DEFAULT_ORG_ID)
+        )
+
+        status, result = await _import(session, ctx, DOCUMENT)
+        assert status == 201
+        assert result.dry_run is False
+        assert [item.name for item in result.items] == ["qwen3-8b", "bge-m3"]
+        assert [item.cluster_id for item in result.items] == [1, 1]
+        # Public form: the LoRA name is bare, as everywhere else in the API.
+        assert result.items[0].model_dump()["lora_list"][0]["lora_name"] == "sql"
+        # The route flag created the base route and the LoRA child route.
+        assert await _route_names(session) == ["qwen3-8b", "qwen3-8b:sql"]
+        assert await _count(session, ModelRouteTarget.__table__) == 2
+
+        exported = await export_models(session, ctx, DeploymentExportRequest())
+        for table in (ModelRouteTarget, ModelRoute, Model):
+            await session.exec(delete(table))
+        await session.commit()
+        assert await _count(session, Model.__table__) == 0
+
+        status, _ = await _import(session, ctx, exported.body.decode())
+        assert status == 201
+        exported_again = await export_models(session, ctx, DeploymentExportRequest())
+        assert _body_without_header(exported_again) == _body_without_header(exported)
+        assert await _route_names(session) == ["qwen3-8b", "qwen3-8b:sql"]
+
+
+@pytest.mark.asyncio
+async def test_import_reports_every_problem_at_once_and_writes_nothing(
+    engine, no_gpu_lookup
+):
+    ctx = _ctx(DEFAULT_ORG_ID)
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        await _seed(
+            session,
+            Cluster(id=1, name="c1", owner_principal_id=DEFAULT_ORG_ID),
+            _model_row("taken"),
+        )
+        document = """
+deployments:
+- name: taken
+  source: huggingface
+  huggingface_repo_id: org/taken
+- name: fine
+  source: huggingface
+  huggingface_repo_id: org/fine
+- name: broken
+  source: huggingface
+  huggingface_repo_id: org/broken
+  replicas: -1
+  colour: red
+- name: fine
+  source: huggingface
+  huggingface_repo_id: org/fine-again
+- name: bad-params
+  source: huggingface
+  huggingface_repo_id: org/bad
+  backend_parameters:
+  - --port=8000
+"""
+        with pytest.raises(BadRequestException) as raised:
+            await _import(session, ctx, document)
+        lines = raised.value.message.split("\n")
+        assert lines[1].startswith("deployments[2] (broken): replicas: ")
+        assert lines[:1] + lines[2:] == [
+            "deployments[2] (broken): unknown field(s): colour",
+            "deployments[3] (fine): duplicate name, already used by deployments[1]",
+            "deployments[0] (taken): Model with name 'taken' already exists.",
+            "deployments[4] (bad-params): Setting the port using --port is not "
+            "supported. Ports are automatically allocated by GPUStack.",
+        ]
+        assert await _count(session, Model.__table__) == 1
+
+        # A cluster the caller cannot use is one 404, not one error per entry.
+        with pytest.raises(NotFoundException):
+            await _import(session, ctx, DOCUMENT, cluster_id=42)
+        assert await _count(session, Model.__table__) == 1
+
+        # A LoRA route name owned by another model only conflicts while the
+        # routes are created; the error still names the entry, nothing stays.
+        await _seed(session, ModelRoute(name="qwen3-8b:sql", created_model_id=999))
+        with pytest.raises(BadRequestException) as raised:
+            await _import(session, ctx, DOCUMENT)
+        assert raised.value.message.startswith("deployments[0] (qwen3-8b): LoRA route")
+        assert await _count(session, Model.__table__) == 1
+
+
+@pytest.mark.asyncio
+async def test_dry_run_validates_without_writing(engine, no_gpu_lookup):
+    ctx = _ctx(DEFAULT_ORG_ID)
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        await _seed(
+            session, Cluster(id=1, name="c1", owner_principal_id=DEFAULT_ORG_ID)
+        )
+
+        status, result = await _import(session, ctx, DOCUMENT, dry_run=True)
+        assert status == 200
+        assert result.dry_run is True
+        assert [item.name for item in result.items] == ["qwen3-8b", "bge-m3"]
+        # The preview is the document as written, not the stored form.
+        assert result.items[0].lora_list[0].lora_name == "sql"
+        assert await _count(session, Model.__table__) == 0
+        assert await _count(session, ModelRoute.__table__) == 0
+
+        status, _ = await _import(session, ctx, DOCUMENT)
+        assert status == 201
+        assert await _count(session, Model.__table__) == 2
+
+
+@pytest.mark.asyncio
+async def test_import_stamps_the_callers_org_and_refuses_foreign_clusters(
+    engine, no_gpu_lookup
+):
+    ctx = _ctx(CUSTOM_ORG_ID)
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        await _seed(
+            session,
+            Cluster(id=1, name="platform", owner_principal_id=DEFAULT_ORG_ID),
+            Cluster(id=2, name="org", owner_principal_id=CUSTOM_ORG_ID),
+        )
+
+        # Another Org's cluster is reported as missing, and nothing is written.
+        with pytest.raises(NotFoundException):
+            await _import(session, ctx, DOCUMENT, cluster_id=1)
+        assert await _count(session, Model.__table__) == 0
+
+        # Own cluster: rows are stamped with the Org, scoped to it, and the
+        # Org is granted on the route it asked for.
+        status, result = await _import(session, ctx, DOCUMENT, cluster_id=2)
+        assert status == 201
+        assert {item.owner_principal_id for item in result.items} == {CUSTOM_ORG_ID}
+        assert {item.access_policy for item in result.items} == {
+            AccessPolicyEnum.ALLOWED_PRINCIPALS
+        }
+        route = await ModelRoute.one_by_field(session, "name", "qwen3-8b")
+        granted = await session.exec(
+            select(ModelRoutePrincipalLink.principal_id).where(
+                ModelRoutePrincipalLink.route_id == route.id
+            )
+        )
+        assert list(granted.all()) == [CUSTOM_ORG_ID]

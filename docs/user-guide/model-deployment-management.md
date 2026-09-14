@@ -107,6 +107,58 @@ Starting a model deployment is equivalent to scaling up the model to one replica
 2. Click the ellipsis button in the `Operations` column, then select `Delete`.
 3. Confirm the deletion.
 
+## Export and Import Deployments
+
+Export deployments to a YAML file that holds their full configuration, and import that file to create them again. Typical uses: back up before an upgrade or migration, restore after reinstalling GPUStack, keep deployment configuration under version control, share a deployment template with your team, or reproduce the same deployments on another cluster.
+
+### Export Deployments
+
+1. Find the model deployment you want to export on the deployment list page.
+2. Click the ellipsis button in the `Operations` column, then select `Export YAML`.
+3. To export several deployments at once, select them first, then choose `Export YAML` from the batch actions dropdown above the list.
+
+The browser downloads a YAML file named `<deployment-name>.yaml` for a single deployment, or `gpustack-deployments-<timestamp>.yaml` for several.
+
+The file has a single top-level `deployments` list. Each item is the request body that created the deployment, minus the fields the server generates or that tie it to one environment:
+
+```yaml
+# Exported from GPUStack v2.3.0 at 2026-09-07T10:00:00Z
+deployments:
+- name: qwen3-8b
+  source: huggingface
+  huggingface_repo_id: Qwen/Qwen3-8B
+  replicas: 1
+  placement_strategy: spread
+  backend: vLLM
+  backend_version: 0.11.0
+  backend_parameters:
+  - --max-model-len=32768
+  env:
+    HF_TOKEN: hf_xxx
+  enable_model_route: true
+```
+
+- **Kept**: everything you configured, including backend parameters, environment variables, GPU and worker selectors, scheduling configuration, speculative decoding, Extended KV Cache, the LoRA list, and whether a model route is created.
+- **Dropped**: IDs, timestamps, runtime state such as ready replicas, metadata derived by the scheduler, the owning cluster and organization, the access policy, and LoRA runtime paths. The server regenerates these on import.
+
+!!! warning
+
+    Environment variables are exported exactly as you entered them and may contain credentials such as `HF_TOKEN`. Do not commit an exported file to a public repository; remove or replace sensitive values before sharing it.
+
+### Import Deployments
+
+1. Click the `Deploy Model` button, then select `Import YAML` in the dropdown.
+2. Choose the exported YAML file.
+3. Select the target `Cluster`. The file carries no cluster information; every deployment is created in the cluster you pick.
+4. Review the validation result. GPUStack validates the whole file before creating anything; on failure it lists each problem with the entry's position, name, and offending field. Fix the file and import again.
+5. Confirm the import. All entries are created at once; if any one fails, no deployment from the file is created.
+
+The following rules apply when importing:
+
+- An import only creates new deployments. A name that appears twice in the file, or that already belongs to a deployment or model route in the target organization, is rejected. Existing deployments are never overwritten or merged.
+- A field GPUStack does not recognize is rejected rather than silently dropped. This usually means the file came from a newer GPUStack release; remove the field named in the error and retry.
+- When importing into a different cluster, `gpu_ids` under `gpu_selector` and `worker_selector` still refer to the GPUs and workers of the original cluster. Change them to values from the target cluster, or remove them to let the scheduler place the deployment; otherwise the import fails because the GPUs cannot be found.
+
 ## View Model Instance
 
 1. Find the model deployment you want to check on the deployment list page.

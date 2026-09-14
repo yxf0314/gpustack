@@ -1,12 +1,14 @@
+import asyncio
 import logging
 import math
-from typing import Any, Dict, List, Optional, Union
-from fastapi import APIRouter, Depends, Query, Request
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import RedirectResponse, StreamingResponse
 from urllib.parse import urlencode
 from gpustack_runtime.detector import ManufacturerEnum
 from sqlalchemy.orm import selectinload
-from sqlmodel import and_, or_
+from sqlmodel import and_, or_, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from gpustack.api.exceptions import (
@@ -25,6 +27,13 @@ from gpustack.schemas.models import (
     ModelListParams,
 )
 from gpustack.schemas.cache_services import CacheService
+from gpustack.schemas.deployment_document import (
+    DeploymentExportRequest,
+    DeploymentImportRequest,
+    DeploymentImportResult,
+    dump_deployments,
+    load_deployments,
+)
 from gpustack.schemas.clusters import Cluster
 from gpustack.schemas.gpu_instance_types import GPUInstanceType
 from gpustack.schemas.workers import GPUDeviceStatus, Worker
@@ -76,6 +85,7 @@ from gpustack.server.lora_model_routes import (
     is_lora_list_stale,
 )
 from gpustack.utils.command import find_parameter
+from gpustack.utils.export_limits import attachment_headers, sanitize_filename
 from gpustack.utils.convert import safe_int
 from gpustack.utils.gpu import parse_gpu_id
 from gpustack.routes.model_common import (
@@ -883,37 +893,49 @@ async def validate_shared_kv_cache(
             )
 
 
-@router.post(
-    "",
-    response_model=ModelPublic,
-)
-async def create_model(
-    session: SessionDep, ctx: TenantContextDep, model_in: ModelCreate
-):
-    # Resolve the owning Org first — admin in "All" mode (no current
-    # principal) inherits the chosen cluster's Org, or falls back to
-    # the platform Org. The same value drives both the uniqueness
-    # pre-check below and the row we stamp on insert; resolving it up
-    # front keeps them in sync so the pre-check actually catches a
-    # collision in the Org the model will land in.
+async def _resolve_target_org(
+    ctx: TenantContext, session: AsyncSession, cluster_id: Optional[int]
+) -> Tuple[int, Optional[Cluster]]:
+    """Resolve the Org a new model lands in, plus the cluster row if it
+    had to be fetched on the way.
+
+    Admin in "All" mode (no current principal) inherits the chosen
+    cluster's Org, or falls back to the platform Org. The same value
+    drives both the uniqueness pre-check and the row stamped on insert;
+    resolving it up front keeps them in sync so the pre-check actually
+    catches a collision in the Org the model will land in.
+    """
     target_org_id = ctx.current_principal_id
     cluster = None
-    if target_org_id is None and model_in.cluster_id is not None:
+    if target_org_id is None and cluster_id is not None:
         # Admin "All" mode has no principal context; derive the owning Org
-        # from the chosen cluster. Reused by the check below to avoid a
-        # second lookup. Under an Org context the helper does the single
-        # lookup itself.
-        cluster = await Cluster.one_by_id(session, model_in.cluster_id)
+        # from the chosen cluster. Returned so the ownership check can
+        # reuse it instead of doing a second lookup.
+        cluster = await Cluster.one_by_id(session, cluster_id)
         if cluster is None:
-            raise NotFoundException(message=f"Cluster {model_in.cluster_id} not found")
+            raise NotFoundException(message=f"Cluster {cluster_id} not found")
         target_org_id = cluster.owner_principal_id
     if target_org_id is None:
         target_org_id = platform_principal_id()
+    return target_org_id, cluster
 
+
+async def _check_model_create(
+    session: AsyncSession,
+    ctx: TenantContext,
+    model_in: ModelCreate,
+    target_org_id: int,
+    cluster: Optional[Cluster],
+) -> None:
+    """Run every pre-insert check for a new model without writing anything.
+
+    Mutates ``model_in`` in place: LoRA names are normalized to the stored
+    ``<base>:<short>`` form and the scaling-schedule baseline is applied.
+    """
     # The chosen cluster must exist, be visible to the caller, and be owned
     # by the target Org. In admin "All" mode target_org_id was derived from
-    # the cluster above, so the ownership check is trivially satisfied and
-    # this mainly rejects a missing/deleted or non-visible cluster_id.
+    # the cluster, so the ownership check is trivially satisfied and this
+    # mainly rejects a missing/deleted or non-visible cluster_id.
     await assert_cluster_belongs_to_org(
         ctx, session, model_in.cluster_id, target_org_id, cluster=cluster
     )
@@ -928,10 +950,7 @@ async def create_model(
         raise AlreadyExistsException(
             message=f"Model with name '{model_in.name}' already exists."
         )
-    should_create_route = (
-        model_in.enable_model_route is not None and model_in.enable_model_route
-    )
-    if should_create_route:
+    if model_in.enable_model_route:
         existing_route = await ModelRoute.one_by_fields(
             session,
             {"name": model_in.name, "owner_principal_id": target_org_id},
@@ -947,13 +966,22 @@ async def create_model(
     await validate_shared_kv_cache(
         session, model_in, target_org_id, model_in.cluster_id
     )
+
+
+async def _persist_model_create(
+    session: AsyncSession, model_in: ModelCreate, target_org_id: int
+) -> Model:
+    """Insert the model and, when ``enable_model_route`` is set, its
+    route, target, Org grant and LoRA child routes. Never commits, so a
+    caller can batch several models into one transaction.
+    """
     model_in_dict = model_in.model_dump(exclude={"enable_model_route"})
 
     # Stamp tenant scope. ModelBase has owner_principal_id defaulted to
     # PLATFORM_PRINCIPAL_ID, so `model_dump()` always emits the key —
     # `setdefault` would silently leave it at 1 even when the caller is
-    # acting under a different Org. Override directly with the value we
-    # resolved above.
+    # acting under a different Org. Override directly with the resolved
+    # value.
     model_in_dict["owner_principal_id"] = target_org_id
 
     # Multi-tenant default: a non-platform Org's new model (and the
@@ -970,55 +998,72 @@ async def create_model(
     if org_scoped_default:
         model_in_dict["access_policy"] = AccessPolicyEnum.ALLOWED_PRINCIPALS
 
-    try:
-        model: Model = await Model.create(
-            session, source=model_in_dict, auto_commit=(not should_create_route)
+    model: Model = await Model.create(session, source=model_in_dict, auto_commit=False)
+    if not model_in.enable_model_route:
+        return model
+
+    model_route = ModelRoute(
+        name=model.name,
+        description=model.description,
+        categories=model.categories,
+        generic_proxy=model.generic_proxy,
+        created_model_id=model.id,
+        access_policy=model.access_policy,
+        owner_principal_id=model.owner_principal_id,
+    )
+    model_route: ModelRoute = await ModelRoute.create(
+        session, source=model_route, auto_commit=False
+    )
+    model_route_target = ModelRouteTarget(
+        name=f"{model.name}-deployment",
+        route_name=model_route.name,
+        generic_proxy=model.generic_proxy,
+        model_route=model_route,
+        model=model,
+        weight=100,
+        state=TargetStateEnum.UNAVAILABLE,
+    )
+    await ModelRouteTarget.create(
+        session,
+        source=model_route_target,
+        auto_commit=False,
+    )
+    if org_scoped_default:
+        # Auto-grant the owning Org on the primary route so its
+        # members see it out of the box. The route is brand new,
+        # so no existence check is needed; LoRA child routes get
+        # their own grants inside create_lora_model_routes.
+        session.add(
+            ModelRoutePrincipalLink(
+                route_id=model_route.id,
+                principal_id=model.owner_principal_id,
+            )
         )
-        if should_create_route:
-            model_route = ModelRoute(
-                name=model.name,
-                description=model.description,
-                categories=model.categories,
-                generic_proxy=model.generic_proxy,
-                created_model_id=model.id,
-                access_policy=model.access_policy,
-                owner_principal_id=model.owner_principal_id,
-            )
-            model_route: ModelRoute = await ModelRoute.create(
-                session, source=model_route, auto_commit=False
-            )
-            model_route_target = ModelRouteTarget(
-                name=f"{model.name}-deployment",
-                route_name=model_route.name,
-                generic_proxy=model.generic_proxy,
-                model_route=model_route,
-                model=model,
-                weight=100,
-                state=TargetStateEnum.UNAVAILABLE,
-            )
-            await ModelRouteTarget.create(
-                session,
-                source=model_route_target,
-                auto_commit=False,
-            )
-            if org_scoped_default:
-                # Auto-grant the owning Org on the primary route so its
-                # members see it out of the box. The route is brand new,
-                # so no existence check is needed; LoRA child routes get
-                # their own grants inside create_lora_model_routes.
-                session.add(
-                    ModelRoutePrincipalLink(
-                        route_id=model_route.id,
-                        principal_id=model.owner_principal_id,
-                    )
-                )
-            await create_lora_model_routes(
-                session,
-                model,
-                access_policy=model.access_policy,
-                generic_proxy=model.generic_proxy,
-            )
-            await session.commit()
+    await create_lora_model_routes(
+        session,
+        model,
+        access_policy=model.access_policy,
+        generic_proxy=model.generic_proxy,
+    )
+    return model
+
+
+@router.post(
+    "",
+    response_model=ModelPublic,
+)
+async def create_model(
+    session: SessionDep, ctx: TenantContextDep, model_in: ModelCreate
+):
+    target_org_id, cluster = await _resolve_target_org(
+        ctx, session, model_in.cluster_id
+    )
+    await _check_model_create(session, ctx, model_in, target_org_id, cluster)
+
+    try:
+        model = await _persist_model_create(session, model_in, target_org_id)
+        await session.commit()
+        if model_in.enable_model_route:
             await revoke_model_access_cache(session=session)
     except BadRequestException:
         await session.rollback()
@@ -1028,6 +1073,168 @@ async def create_model(
         raise InternalServerErrorException(message=f"Failed to create model: {e}")
 
     return model
+
+
+async def _models_to_export(
+    session: AsyncSession, ctx: TenantContext, export_in: DeploymentExportRequest
+) -> List[Model]:
+    """The rows an export covers, by id so a re-export is byte-stable.
+
+    With ``ids`` given, every id must resolve to a row the caller can see
+    (and match ``cluster_id`` when set); otherwise 404 with no partial
+    result, mirroring ``GET /models/{id}`` for cross-tenant ids.
+    """
+    conditions = list(tenant_list_conditions(ctx, Model))
+    if export_in.ids is not None:
+        conditions.append(Model.id.in_(export_in.ids))
+    fields = {}
+    if export_in.cluster_id is not None:
+        fields["cluster_id"] = export_in.cluster_id
+    models = list(
+        await Model.all_by_fields(session, fields=fields, extra_conditions=conditions)
+    )
+    if export_in.ids is not None:
+        found = {model.id for model in models}
+        missing = [str(id) for id in export_in.ids if id not in found]
+        if missing:
+            raise NotFoundException(message=f"Model not found: {', '.join(missing)}")
+    models.sort(key=lambda model: model.id)
+    return models
+
+
+async def _route_backed_model_ids(
+    session: AsyncSession, models: List[Model]
+) -> Set[int]:
+    """Ids among ``models`` whose primary model route still exists.
+
+    LoRA child routes carry ``created_model_id`` too, so only the live route
+    named after the model counts: that is the one ``enable_model_route``
+    re-creates on import.
+    """
+    names_by_id = {model.id: model.name for model in models}
+    if not names_by_id:
+        return set()
+    result = await session.exec(
+        select(ModelRoute.created_model_id, ModelRoute.name).where(
+            ModelRoute.created_model_id.in_(list(names_by_id)),
+            ModelRoute.deleted_at.is_(None),
+        )
+    )
+    return {
+        created_model_id
+        for created_model_id, name in result.all()
+        if names_by_id.get(created_model_id) == name
+    }
+
+
+@router.post("/export")
+async def export_models(
+    session: SessionDep, ctx: TenantContextDep, export_in: DeploymentExportRequest
+):
+    """Download deployments as a YAML document (``schemas/deployment_document``).
+
+    POST rather than GET: ``/export`` is a fixed segment inside the ``/{id}``
+    namespace, and only a different method keeps it independent of route
+    registration order.
+    """
+    models = await _models_to_export(session, ctx, export_in)
+    route_backed_ids = await _route_backed_model_ids(session, models)
+    exported_at = datetime.now(timezone.utc)
+    content = dump_deployments(models, route_backed_ids, exported_at)
+    if len(models) == 1:
+        filename = sanitize_filename(f"{models[0].name}.yaml", "deployment.yaml")
+    else:
+        filename = f"gpustack-deployments-{exported_at:%Y%m%d-%H%M%S}.yaml"
+    return Response(
+        content=content,
+        media_type="application/x-yaml",
+        headers=attachment_headers(filename),
+    )
+
+
+@router.post("/import", response_model=DeploymentImportResult)
+async def import_models(
+    session: SessionDep,
+    ctx: TenantContextDep,
+    import_in: DeploymentImportRequest,
+    response: Response,
+):
+    """Create every deployment in a document, or none of them.
+
+    Parsing, per-entry validation and the checks ``create_model`` runs all
+    finish before the first write; their failures are aggregated into one
+    400 that names each entry. Creation is a single transaction.
+    """
+    try:
+        loaded = await asyncio.to_thread(load_deployments, import_in.content)
+    except ValueError as e:
+        raise BadRequestException(message=str(e))
+
+    target_org_id, cluster = await _resolve_target_org(
+        ctx, session, import_in.cluster_id
+    )
+    if cluster is None:
+        cluster = await Cluster.one_by_id(session, import_in.cluster_id)
+    # Once, up front: a bad cluster is one 404/403, not one error per entry.
+    await assert_cluster_belongs_to_org(
+        ctx, session, import_in.cluster_id, target_org_id, cluster=cluster
+    )
+
+    # The checks normalize entries in place (LoRA prefixes, scaling baseline);
+    # a dry run previews what the user wrote, not the stored form.
+    preview = [entry.model_copy(deep=True) for _, entry in loaded.entries]
+    errors = list(loaded.errors)
+    for index, entry in loaded.entries:
+        entry.cluster_id = import_in.cluster_id
+        try:
+            await _check_model_create(session, ctx, entry, target_org_id, cluster)
+        except (BadRequestException, AlreadyExistsException, NotFoundException) as e:
+            errors.append(f"deployments[{index}] ({entry.name}): {e.message}")
+    if errors:
+        raise BadRequestException(message="\n".join(errors))
+    if import_in.dry_run:
+        return DeploymentImportResult(dry_run=True, items=preview)
+
+    try:
+        models = await _persist_deployments(session, loaded.entries, target_org_id)
+        await session.commit()
+        if any(entry.enable_model_route for _, entry in loaded.entries):
+            await revoke_model_access_cache(session=session)
+    except BadRequestException:
+        await session.rollback()
+        raise
+    except Exception as e:
+        await session.rollback()
+        # The exception text can carry bound parameters, env values included.
+        logger.error(f"Failed to import deployments: {e}")
+        raise InternalServerErrorException(message="Failed to import deployments")
+
+    response.status_code = 201
+    return DeploymentImportResult(
+        dry_run=False, items=[ModelPublic.model_validate(model) for model in models]
+    )
+
+
+async def _persist_deployments(
+    session: AsyncSession,
+    entries: List[Tuple[int, ModelCreate]],
+    target_org_id: int,
+) -> List[Model]:
+    """Write every entry without committing.
+
+    A LoRA route name conflict only surfaces while the routes are created, so
+    it is relabelled here with the entry it belongs to, like every other error
+    the import reports.
+    """
+    models = []
+    for index, entry in entries:
+        try:
+            models.append(await _persist_model_create(session, entry, target_org_id))
+        except BadRequestException as e:
+            raise BadRequestException(
+                message=f"deployments[{index}] ({entry.name}): {e.message}"
+            )
+    return models
 
 
 @router.put(
