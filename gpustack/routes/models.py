@@ -929,6 +929,24 @@ async def _resolve_target_org(
     return target_org_id, cluster
 
 
+async def _assert_route_name_available(
+    session: AsyncSession, model_in: ModelCreate, target_org_id: int
+) -> None:
+    """Reject a route name already taken in the target Org, when one is asked
+    for. Separate from the model-name check so a path that already knows the
+    model's fate can run just this half, and report it in the same words."""
+    if not model_in.enable_model_route:
+        return
+    existing_route = await ModelRoute.one_by_fields(
+        session,
+        {"name": model_in.name, "owner_principal_id": target_org_id},
+    )
+    if existing_route:
+        raise AlreadyExistsException(
+            message=f"Model route with name '{model_in.name}' already exists."
+        )
+
+
 async def _assert_model_name_available(
     session: AsyncSession, model_in: ModelCreate, target_org_id: int
 ) -> None:
@@ -947,15 +965,7 @@ async def _assert_model_name_available(
         raise AlreadyExistsException(
             message=f"Model with name '{model_in.name}' already exists."
         )
-    if model_in.enable_model_route:
-        existing_route = await ModelRoute.one_by_fields(
-            session,
-            {"name": model_in.name, "owner_principal_id": target_org_id},
-        )
-        if existing_route:
-            raise AlreadyExistsException(
-                message=f"Model route with name '{model_in.name}' already exists."
-            )
+    await _assert_route_name_available(session, model_in, target_org_id)
 
 
 async def _validate_model_spec(
@@ -1222,28 +1232,6 @@ def _apply_replica_override(model_in: ModelCreate, replicas: int) -> List[str]:
     return []
 
 
-def _overwrite_blockers(existing: Model, cluster_id: int) -> List[str]:
-    """Why this deployment cannot be replaced, if it cannot.
-
-    Overwriting is deliberately narrow, because a document is an easy thing to
-    apply by accident: only a stopped deployment, and only in the cluster the
-    import targets. "Stopped" is the product's existing definition, the one
-    the deployment list filters on.
-    """
-    blockers = []
-    if existing.replicas > 0:
-        blockers.append(
-            f"already exists and is running (replicas={existing.replicas}); "
-            "stop it before overwriting"
-        )
-    if existing.cluster_id != cluster_id:
-        blockers.append(
-            f"already exists in cluster {existing.cluster_id}; "
-            f"this import targets cluster {cluster_id}"
-        )
-    return blockers
-
-
 async def _own_model_routes(session: AsyncSession, model: Model) -> List[ModelRoute]:
     """The live routes this deployment created -- its primary route and its
     LoRA children. The same test the export reads ``enable_model_route`` off,
@@ -1255,40 +1243,83 @@ async def _own_model_routes(session: AsyncSession, model: Model) -> List[ModelRo
     )
 
 
-async def _route_blockers(
-    session: AsyncSession, existing: Model, model_in: ModelCreate, target_org_id: int
+async def _routes_serving_others(
+    session: AsyncSession, routes: List[ModelRoute], model_id: int
 ) -> List[str]:
-    """Why this deployment's routes cannot be brought in line with the entry."""
-    own = await _own_model_routes(session, existing)
-    primary = next((route for route in own if route.name == existing.name), None)
-
-    if model_in.enable_model_route:
-        if primary is not None:
-            return []
-        clash = await ModelRoute.one_by_fields(
-            session, {"name": existing.name, "owner_principal_id": target_org_id}
-        )
-        if clash:
-            return [
-                f"model route '{existing.name}' already exists and was not "
-                "created by this deployment"
-            ]
+    """Names of ``routes`` that also target a deployment other than this one."""
+    if not routes:
         return []
-
-    if primary is None:
-        return []
-    # Dropping the route is safe only because the deployment is stopped --
-    # but another deployment attached to the same route need not be, and
-    # deleting it would cut that one off too.
-    shared = await ModelRouteTarget.all_by_fields(
-        session, {"route_id": primary.id, "deleted_at": None}
+    targets = await ModelRouteTarget.all_by_fields(
+        session,
+        {"deleted_at": None},
+        extra_conditions=[
+            ModelRouteTarget.route_id.in_([route.id for route in routes])
+        ],
     )
-    if any(target.model_id != existing.id for target in shared):
-        return [
-            f"model route '{primary.name}' also targets other deployments; "
-            "detach them before disabling it"
-        ]
-    return []
+    shared = {target.route_id for target in targets if target.model_id != model_id}
+    return sorted(route.name for route in routes if route.id in shared)
+
+
+async def _overwrite_blockers(
+    session: AsyncSession,
+    existing: Model,
+    model_in: ModelCreate,
+    own_routes: List[ModelRoute],
+    cluster_id: int,
+    target_org_id: int,
+) -> List[str]:
+    """Why this deployment cannot be replaced, if it cannot.
+
+    Overwriting is deliberately narrow, because a document is an easy thing to
+    apply by accident: only a deployment that is both meant to be stopped and
+    actually stopped, and only in the cluster the import targets.
+
+    ``replicas`` alone is the operator's intent, not the cluster's state --
+    instances are torn down asynchronously after a scale to zero, so a
+    deployment can read as stopped while it is still serving. Both are
+    checked, because the rest of the overwrite path (dropping model routes
+    especially) is only safe once nothing is running.
+    """
+    blockers = []
+    if existing.replicas > 0:
+        blockers.append(
+            f"already exists and is running (replicas={existing.replicas}); "
+            "stop it before overwriting"
+        )
+    else:
+        live = await ModelInstance.all_by_fields(
+            session, {"model_id": existing.id, "deleted_at": None}
+        )
+        if live:
+            blockers.append(
+                f"already exists and still has {len(live)} instance(s) "
+                "shutting down; wait for them to stop before overwriting"
+            )
+    if existing.cluster_id != cluster_id:
+        blockers.append(
+            f"already exists in cluster {existing.cluster_id}; "
+            f"this import targets cluster {cluster_id}"
+        )
+
+    primary = next((route for route in own_routes if route.name == existing.name), None)
+    if model_in.enable_model_route:
+        if primary is None:
+            try:
+                await _assert_route_name_available(session, model_in, target_org_id)
+            except AlreadyExistsException as e:
+                blockers.append(e.message)
+    elif primary is not None:
+        # Dropping these is safe only because the deployment is stopped -- but
+        # another deployment attached to one of them need not be, and deleting
+        # it would cut that one off too. Every route about to go is checked,
+        # LoRA children included.
+        shared = await _routes_serving_others(session, own_routes, existing.id)
+        if shared:
+            blockers.append(
+                f"model route(s) {', '.join(shared)} also target other "
+                "deployments; detach them before disabling the route"
+            )
+    return blockers
 
 
 async def _plan_import(
@@ -1336,24 +1367,38 @@ async def _plan_import(
         )
         if existing is None:
             plan.action = DeploymentActionEnum.CREATE
+            # The model name is settled by the lookup above; only the route
+            # name is still open.
             try:
-                await _assert_model_name_available(session, model_in, target_org_id)
+                await _assert_route_name_available(session, model_in, target_org_id)
             except AlreadyExistsException as e:
                 plan.errors.append(e.message)
         else:
-            route_backed = await _route_backed_model_ids(session, [existing])
+            own_routes = await _own_model_routes(session, existing)
+            route_backed = any(route.name == existing.name for route in own_routes)
             plan.changes = diff_entries(
-                deployment_entry(existing, existing.id in route_backed), desired
+                deployment_entry(existing, route_backed), desired
             )
             plan.action = (
                 DeploymentActionEnum.UPDATE
                 if plan.changes
                 else DeploymentActionEnum.UNCHANGED
             )
-            plan.errors.extend(_overwrite_blockers(existing, import_in.cluster_id))
-            plan.errors.extend(
-                await _route_blockers(session, existing, model_in, target_org_id)
-            )
+            # Only an entry that would actually be written has to clear these.
+            # An unchanged one writes nothing, so holding it to the overwrite
+            # rules would reject re-importing an untouched export of a running
+            # deployment -- the very thing a backup is for.
+            if plan.action is DeploymentActionEnum.UPDATE:
+                plan.errors.extend(
+                    await _overwrite_blockers(
+                        session,
+                        existing,
+                        model_in,
+                        own_routes,
+                        import_in.cluster_id,
+                        target_org_id,
+                    )
+                )
 
         try:
             await _validate_model_spec(session, model_in, target_org_id)
@@ -1415,30 +1460,47 @@ async def import_models(
             )
         )
 
+    # Every unconfirmed overwrite at once, like every other problem the import
+    # reports -- not just the first one the write loop happens to reach.
+    unconfirmed = [
+        f"{entry_label(item.plan.index, item.plan.name)}: already exists; "
+        "confirm the overwrite before importing"
+        for item in items
+        if item.plan.action is DeploymentActionEnum.UPDATE
+        and item.plan.name not in import_in.overwrite
+    ]
+    if unconfirmed:
+        raise BadRequestException(message="\n".join(unconfirmed))
+
     try:
         models = await _persist_deployments(
-            session, items, import_in.overwrite, target_org_id
+            session, items, import_in.cluster_id, target_org_id
         )
         await session.commit()
-        # An overwrite can create or drop routes either way, so it always
-        # invalidates; a plain create only when it asked for a route.
-        if any(
-            item.plan.action is DeploymentActionEnum.UPDATE
-            or (
-                item.plan.action is DeploymentActionEnum.CREATE
-                and item.entry.enable_model_route
-            )
-            for item in items
-        ):
-            await revoke_model_access_cache(session=session)
     except BadRequestException:
         await session.rollback()
         raise
     except Exception as e:
         await session.rollback()
-        # The exception text can carry bound parameters, env values included.
-        logger.error(f"Failed to import deployments: {e}")
+        # Only the type: the exception text carries SQLAlchemy's bound
+        # parameters, and for this route those include a deployment's `env`.
+        logger.error(f"Failed to import deployments: {type(e).__name__}")
         raise InternalServerErrorException(message="Failed to import deployments")
+
+    # After the commit, and outside its try: a cache that fails to clear has
+    # not undone the write, and reporting 500 here would tell the caller
+    # nothing happened when everything did.
+    # An overwrite can create or drop routes either way, so it always
+    # invalidates; a plain create only when it asked for a route.
+    if any(
+        item.plan.action is DeploymentActionEnum.UPDATE
+        or (
+            item.plan.action is DeploymentActionEnum.CREATE
+            and item.entry.enable_model_route
+        )
+        for item in items
+    ):
+        await revoke_model_access_cache(session=session)
 
     return DeploymentImportResult(
         dry_run=False,
@@ -1478,13 +1540,15 @@ async def _persist_model_update(
             grant_owning_org=existing.access_policy
             == AccessPolicyEnum.ALLOWED_PRINCIPALS,
         )
-        return existing
-    await create_lora_model_routes(
-        session,
-        existing,
-        access_policy=existing.access_policy,
-        generic_proxy=existing.generic_proxy,
-    )
+    else:
+        await create_lora_model_routes(
+            session,
+            existing,
+            access_policy=existing.access_policy,
+            generic_proxy=existing.generic_proxy,
+        )
+    # Either way the new lora_list decides which child routes survive: a
+    # rebuilt primary route can still have children left from the old one.
     await cleanup_orphan_lora_routes(session, existing)
     return existing
 
@@ -1492,11 +1556,14 @@ async def _persist_model_update(
 async def _persist_deployments(
     session: AsyncSession,
     items: List[_ImportItem],
-    overwrite: List[str],
+    cluster_id: int,
     target_org_id: int,
 ) -> List[Model]:
     """Write every entry without committing, and answer with the row each one
     settled on, in document order.
+
+    Callers must have rejected the plan already if any entry carries errors,
+    so every item here has an ``action`` and a parsed ``entry``.
 
     A LoRA route name conflict only surfaces while the routes are created, so
     it is relabelled here with the entry it belongs to, like every other error
@@ -1512,11 +1579,20 @@ async def _persist_deployments(
             continue
         try:
             if item.plan.action is DeploymentActionEnum.UPDATE:
-                if item.plan.name not in overwrite:
-                    raise BadRequestException(
-                        message="already exists; confirm the overwrite before "
-                        "importing"
-                    )
+                # Re-checked inside the transaction: the plan was built before
+                # it opened, and the gate it enforces -- nothing running -- is
+                # the whole reason dropping routes here is safe.
+                own_routes = await _own_model_routes(session, item.existing)
+                blockers = await _overwrite_blockers(
+                    session,
+                    item.existing,
+                    item.entry,
+                    own_routes,
+                    cluster_id,
+                    target_org_id,
+                )
+                if blockers:
+                    raise BadRequestException(message=blockers[0])
                 models.append(
                     await _persist_model_update(session, item.existing, item.entry)
                 )

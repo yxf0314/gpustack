@@ -58,11 +58,15 @@ ENTRY_FIELDS: List[str] = ["name"] + [
     if field != "name" and field not in SERVER_MANAGED_FIELDS
 ]
 
-# What an overwrite writes onto the existing row. A whitelist rather than a
-# blacklist on purpose: a ModelCreate dump also carries owner_principal_id and
+# What an overwrite writes onto the existing row. Everything outside this
+# list is left alone: a ModelCreate dump also carries owner_principal_id and
 # access_policy at their defaults, and writing those would re-home the row to
 # the platform Org and drop the grants scoping it to its own.
 # ``enable_model_route`` is not a column -- it settles routes instead.
+#
+# Derived, so a new ModelSpecBase field joins both the export and the
+# overwrite set on its own. ``test_entry_fields_are_pinned`` holds the list to
+# a golden copy so that stays a deliberate act.
 OVERWRITABLE_FIELDS: List[str] = [
     field for field in ENTRY_FIELDS if field != "enable_model_route"
 ]
@@ -171,8 +175,15 @@ class DeploymentImportRequest(BaseModel):
     """Plan only, write nothing."""
     overwrite: List[str] = []
     """Deployments the caller agreed to replace, by name. An entry that would
-    overwrite one not named here is refused rather than applied: the plan the
-    caller confirmed has to still be the plan being written."""
+    overwrite one not named here is refused rather than applied.
+
+    Consent is to the *set of rows*, not to the diff that was on screen: a
+    name here still authorizes whatever the document says by the time the
+    write runs. A name that turns out not to need overwriting is ignored
+    rather than rejected -- an entry can go from ``update`` to ``unchanged``
+    between the plan and the write, and that is not the caller's mistake.
+    ``replica_overrides`` is stricter because an unmatched name there would
+    silently fail to apply a value the caller asked for."""
     replica_overrides: Dict[str, NonNegativeInt] = {}
     """Replica counts to use instead of the document's, by deployment name, so
     one document suits environments of different sizes without being edited."""

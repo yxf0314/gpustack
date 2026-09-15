@@ -27,6 +27,8 @@ from gpustack.routes.models import (
 from gpustack.routes.model_common import ModelStateFilterEnum
 from gpustack.schemas.clusters import Cluster
 from gpustack.schemas.deployment_document import (
+    ENTRY_FIELDS,
+    OVERWRITABLE_FIELDS,
     DeploymentExportRequest,
     DeploymentImportRequest,
     dump_deployments,
@@ -43,6 +45,8 @@ from gpustack.schemas.models import (
     LoraListEntry,
     Model,
     ModelCreate,
+    ModelInstance,
+    ModelInstanceStateEnum,
     ModelUpdate,
     SourceEnum,
 )
@@ -370,6 +374,7 @@ TABLES = (
     Principal.__table__,
     Cluster.__table__,
     Model.__table__,
+    ModelInstance.__table__,
     ModelRoute.__table__,
     ModelRouteTarget.__table__,
     ModelRoutePrincipalLink.__table__,
@@ -397,6 +402,22 @@ DOCUMENT = """
   source: huggingface
   huggingface_repo_id: BAAI/bge-m3
   replicas: 2
+"""
+
+# A live scaling schedule drives `replicas` itself, so it is kept out of
+# DOCUMENT (which the overwrite tests stop entry by entry) and appended only
+# where a round trip has to carry one.
+SCHEDULED_ENTRY = """- name: scheduled
+  source: huggingface
+  huggingface_repo_id: org/scheduled
+  scaling_schedule:
+    enabled: true
+    baseline_replicas: 1
+    rules:
+    - start_cron: 0 8 * * *
+      duration_seconds: 3600
+      replicas: 4
+      name: daytime
 """
 
 
@@ -493,43 +514,56 @@ def test_dump_is_byte_stable_and_infers_the_route_flag_per_model():
     assert flags == [True, False]
 
 
-def test_dump_omits_scheduler_placement_for_an_auto_scheduled_model():
-    """Where the scheduler put a deployment must never reach the document:
-    those GPUs need not exist in the cluster it is imported into. Placement
-    lives on ModelInstance, and only a user writes Model.gpu_selector --
-    a sentinel for both, since neither is enforced by a type."""
-    auto, manual = yaml.safe_load(
-        dump_deployments(
-            [
-                _exported_row(gpu_selector=None, worker_selector={"zone": "a"}),
-                _exported_row(
-                    id=8,
-                    name="manual",
-                    gpu_selector=GPUSelector(
-                        gpu_ids=["worker-1:cuda:0", "worker-1:cuda:1"],
-                        gpus_per_replica=2,
-                    ),
-                ),
-            ],
-            route_backed_ids=set(),
-            exported_at=EXPORTED_AT,
-        )
-    )
-
-    assert "gpu_selector" not in auto
-    assert "gpu_type_selector" not in auto
-    assert auto["worker_selector"] == {"zone": "a"}
-    # A manual pick is the user's own intent, and survives verbatim.
-    assert manual["gpu_selector"] == {
-        "gpu_ids": ["worker-1:cuda:0", "worker-1:cuda:1"],
-        "gpus_per_replica": 2,
-    }
+def test_entry_fields_are_pinned():
+    """The document's field set is derived, so a new column on the deployment
+    schema would silently join both the export and what an overwrite writes.
+    Pinning it makes that a deliberate edit, here and in the docs."""
+    assert ENTRY_FIELDS == [
+        "name",
+        "source",
+        "huggingface_repo_id",
+        "huggingface_filename",
+        "model_scope_model_id",
+        "model_scope_file_path",
+        "local_path",
+        "description",
+        "replicas",
+        "categories",
+        "placement_strategy",
+        "cpu_offloading",
+        "distributed_inference_across_workers",
+        "worker_selector",
+        "gpu_selector",
+        "gpu_type_selector",
+        "backend",
+        "backend_version",
+        "backend_parameters",
+        "image_name",
+        "run_command",
+        "native_anthropic_api",
+        "env",
+        "restart_on_error",
+        "distributable",
+        "extended_kv_cache",
+        "speculative_config",
+        "scaling_schedule",
+        "generic_proxy",
+        "lora_list",
+        "enable_model_route",
+    ]
+    assert OVERWRITABLE_FIELDS == [
+        field for field in ENTRY_FIELDS if field != "enable_model_route"
+    ]
+    # Tenancy and identity are the fields that must never be written by an
+    # import, whatever else the schema grows.
+    for field in ("id", "cluster_id", "owner_principal_id", "access_policy", "meta"):
+        assert field not in ENTRY_FIELDS, field
 
 
 @pytest.mark.parametrize(
     "text, message",
     [
-        # The pre-release wrapper key is just another mapping now.
+        # Only a list is a document; a mapping is one whatever its keys.
         ("deployments:\n- name: a\n", "must be a list of deployments"),
         ("just a string\n", "must be a list of deployments"),
         ("\n", "must be a list of deployments"),
@@ -751,6 +785,53 @@ async def test_export_scopes_to_the_caller_and_names_the_file(engine):
 
 
 @pytest.mark.asyncio
+async def test_export_omits_scheduler_placement(engine, no_gpu_lookup):
+    """Where the scheduler put a deployment must never reach the document:
+    those GPUs need not exist in the cluster it is imported into. A sentinel
+    for a property nothing enforces -- placement lives on ModelInstance, and
+    only a user writes Model.gpu_selector."""
+    ctx = _ctx(DEFAULT_ORG_ID)
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        await _seed(
+            session,
+            Cluster(id=1, name="c1", owner_principal_id=DEFAULT_ORG_ID),
+            _model_row("auto", worker_selector={"zone": "a"}),
+            _model_row(
+                "manual",
+                gpu_selector=GPUSelector(
+                    gpu_ids=["worker-1:cuda:0", "worker-1:cuda:1"],
+                    gpus_per_replica=2,
+                ),
+            ),
+        )
+        auto = await Model.one_by_field(session, "name", "auto")
+        await _seed(
+            session,
+            ModelInstance(
+                name="auto-0",
+                source=SourceEnum.HUGGING_FACE,
+                huggingface_repo_id="org/auto",
+                model_id=auto.id,
+                model_name="auto",
+                worker_id=4,
+                gpu_indexes=[0, 1],
+                state=ModelInstanceStateEnum.RUNNING,
+            ),
+        )
+
+        entries = _entries(await export_models(session, ctx, DeploymentExportRequest()))
+        by_name = {entry["name"]: entry for entry in entries}
+        assert "gpu_selector" not in by_name["auto"]
+        assert "gpu_type_selector" not in by_name["auto"]
+        assert by_name["auto"]["worker_selector"] == {"zone": "a"}
+        # A manual pick is the user's own intent, and survives verbatim.
+        assert by_name["manual"]["gpu_selector"] == {
+            "gpu_ids": ["worker-1:cuda:0", "worker-1:cuda:1"],
+            "gpus_per_replica": 2,
+        }
+
+
+@pytest.mark.asyncio
 async def test_import_round_trips_an_export(engine, no_gpu_lookup):
     ctx = _ctx(DEFAULT_ORG_ID)
     async with AsyncSession(engine, expire_on_commit=False) as session:
@@ -758,11 +839,20 @@ async def test_import_round_trips_an_export(engine, no_gpu_lookup):
             session, Cluster(id=1, name="c1", owner_principal_id=DEFAULT_ORG_ID)
         )
 
-        result = await _import(session, ctx, DOCUMENT)
+        document = DOCUMENT + SCHEDULED_ENTRY
+        result = await _import(session, ctx, document)
         assert result.dry_run is False
-        assert _plan(result) == [("qwen3-8b", "create", []), ("bge-m3", "create", [])]
-        assert [item.name for item in result.items] == ["qwen3-8b", "bge-m3"]
-        assert [item.cluster_id for item in result.items] == [1, 1]
+        assert _plan(result) == [
+            ("qwen3-8b", "create", []),
+            ("bge-m3", "create", []),
+            ("scheduled", "create", []),
+        ]
+        assert [item.name for item in result.items] == [
+            "qwen3-8b",
+            "bge-m3",
+            "scheduled",
+        ]
+        assert [item.cluster_id for item in result.items] == [1, 1, 1]
         # Public form: the LoRA name is bare, as everywhere else in the API.
         assert result.items[0].model_dump()["lora_list"][0]["lora_name"] == "sql"
         # The route flag created the base route and the LoRA child route.
@@ -771,12 +861,11 @@ async def test_import_round_trips_an_export(engine, no_gpu_lookup):
 
         exported = await export_models(session, ctx, DeploymentExportRequest())
 
-        # Re-importing an export of rows that still exist changes nothing.
+        # Re-importing an export of rows that still exist changes nothing --
+        # including while they run, since nothing would be written.
         result = await _import(session, ctx, exported.body.decode(), dry_run=True)
-        assert _plan(result) == [
-            ("qwen3-8b", "unchanged", []),
-            ("bge-m3", "unchanged", []),
-        ]
+        assert [entry.action.value for entry in result.entries] == ["unchanged"] * 3
+        assert result.valid is True
 
         for table in (ModelRouteTarget, ModelRoute, Model):
             await session.exec(delete(table))
@@ -784,6 +873,9 @@ async def test_import_round_trips_an_export(engine, no_gpu_lookup):
         assert await _count(session, Model.__table__) == 0
 
         await _import(session, ctx, exported.body.decode())
+        # The scheduled entry survives the trip with its rules intact.
+        scheduled = await Model.one_by_field(session, "name", "scheduled")
+        assert scheduled.scaling_schedule.rules[0].start_cron == "0 8 * * *"
         exported_again = await export_models(session, ctx, DeploymentExportRequest())
         assert _body_without_header(exported_again) == _body_without_header(exported)
         assert await _route_names(session) == ["qwen3-8b", "qwen3-8b:sql"]
@@ -913,12 +1005,29 @@ async def test_overwrite_replaces_only_what_was_confirmed(engine, no_gpu_lookup)
         result = await _import(session, ctx, edited, cluster_id=2)
         assert {entry.action.value for entry in result.entries} == {"unchanged"}
 
-        # Setting a nested column takes a different path from clearing one.
+        # Setting a nested column takes a different path from clearing one,
+        # and mutating one is exactly one change.
         repinned = _stopped(DOCUMENT).replace("worker-1:cuda:0", "worker-2:cuda:3")
+        result = await _import(session, ctx, repinned, cluster_id=2, dry_run=True)
+        assert [change.field for change in result.entries[0].changes] == [
+            "gpu_selector"
+        ]
         await _import(session, ctx, repinned, cluster_id=2, overwrite=["qwen3-8b"])
         session.expire_all()
         after = await Model.one_by_field(session, "name", "qwen3-8b")
         assert after.gpu_selector.gpu_ids == ["worker-2:cuda:3"]
+
+        # Every unconfirmed overwrite is named at once, not just the first.
+        both = _stopped(DOCUMENT).replace("Qwen/Qwen3-8B", "Qwen/Qwen3-4B")
+        both = both.replace("BAAI/bge-m3", "BAAI/bge-m3-v2")
+        with pytest.raises(BadRequestException) as raised:
+            await _import(session, ctx, both, cluster_id=2)
+        assert raised.value.message.split("\n") == [
+            "deployment[0] (qwen3-8b): already exists; confirm the overwrite "
+            "before importing",
+            "deployment[1] (bge-m3): already exists; confirm the overwrite "
+            "before importing",
+        ]
 
 
 @pytest.mark.asyncio
@@ -949,11 +1058,33 @@ async def test_overwrite_settles_the_model_route(engine, no_gpu_lookup):
         unrouted = _stopped(DOCUMENT).replace("  enable_model_route: true\n", "")
         result = await _import(session, ctx, unrouted, dry_run=True)
         assert result.entries[0].errors == [
-            "model route 'qwen3-8b' also targets other deployments; "
-            "detach them before disabling it"
+            "model route(s) qwen3-8b also target other deployments; "
+            "detach them before disabling the route"
         ]
         assert "enable_model_route" in [
             change.field for change in result.entries[0].changes
+        ]
+
+        # A LoRA child route is deleted by the same step, so it is held to the
+        # same test -- sharing one blocks the entry just as the primary does.
+        await session.exec(
+            delete(ModelRouteTarget).where(ModelRouteTarget.model_id == other.id)
+        )
+        child = await ModelRoute.one_by_field(session, "name", "qwen3-8b:sql")
+        await _seed(
+            session,
+            ModelRouteTarget(
+                name="other-lora",
+                route_name=child.name,
+                route_id=child.id,
+                model_id=other.id,
+                weight=100,
+            ),
+        )
+        result = await _import(session, ctx, unrouted, dry_run=True)
+        assert result.entries[0].errors == [
+            "model route(s) qwen3-8b:sql also target other deployments; "
+            "detach them before disabling the route"
         ]
 
         # Once it serves only this deployment, disabling it takes the primary
@@ -997,9 +1128,31 @@ async def test_overwrite_refuses_a_running_or_foreign_deployment(engine, no_gpu_
         with pytest.raises(BadRequestException):
             await _import(session, ctx, running, overwrite=["bge-m3"])
 
-        # Stopped, but living in another cluster: no silent migration.
+        # Scaled to zero but not drained yet: replicas is the operator's
+        # intent, the instance rows are the cluster's state, and the overwrite
+        # path needs both.
         stopped = await Model.one_by_field(session, "name", "bge-m3")
         await stopped.update(session, {"replicas": 0})
+        await _seed(
+            session,
+            ModelInstance(
+                name="bge-m3-0",
+                source=SourceEnum.HUGGING_FACE,
+                huggingface_repo_id="BAAI/bge-m3",
+                model_id=stopped.id,
+                model_name="bge-m3",
+            ),
+        )
+        result = await _import(session, ctx, running, dry_run=True)
+        assert result.entries[0].errors == [
+            "already exists and still has 1 instance(s) shutting down; "
+            "wait for them to stop before overwriting"
+        ]
+        await session.exec(delete(ModelInstance))
+        await session.commit()
+
+        # Stopped and drained, but living in another cluster: no silent
+        # migration.
         result = await _import(session, ctx, running, cluster_id=3, dry_run=True)
         assert result.entries[0].errors == [
             "already exists in cluster 1; this import targets cluster 3"
