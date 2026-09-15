@@ -1189,7 +1189,7 @@ async def import_models(
         try:
             await _check_model_create(session, ctx, entry, target_org_id, cluster)
         except (BadRequestException, AlreadyExistsException, NotFoundException) as e:
-            errors.append(f"deployments[{index}] ({entry.name}): {e.message}")
+            errors.append(f"deployment[{index}] ({entry.name}): {e.message}")
     if errors:
         raise BadRequestException(message="\n".join(errors))
     if import_in.dry_run:
@@ -1232,7 +1232,7 @@ async def _persist_deployments(
             models.append(await _persist_model_create(session, entry, target_org_id))
         except BadRequestException as e:
             raise BadRequestException(
-                message=f"deployments[{index}] ({entry.name}): {e.message}"
+                message=f"deployment[{index}] ({entry.name}): {e.message}"
             )
     return models
 

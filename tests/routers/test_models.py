@@ -379,7 +379,6 @@ TABLES = (
 # What a user would hand-write: a routed base model with a LoRA, explicit GPU
 # placement and a credential, plus a plain embedding model.
 DOCUMENT = """
-deployments:
 - name: qwen3-8b
   source: huggingface
   huggingface_repo_id: Qwen/Qwen3-8B
@@ -454,9 +453,7 @@ def test_dump_keeps_user_input_and_drops_server_state():
 
     assert text.startswith("# Exported from GPUStack v")
     assert "at 2026-09-07T10:00:00Z\n" in text
-    document = yaml.safe_load(text)
-    assert list(document) == ["deployments"]
-    (entry,) = document["deployments"]
+    (entry,) = yaml.safe_load(text)
 
     # ``name`` leads, everything else keeps the schema's declaration order.
     assert list(entry)[:3] == ["name", "source", "huggingface_repo_id"]
@@ -493,19 +490,18 @@ def test_dump_is_byte_stable_and_infers_the_route_flag_per_model():
     second = dump_deployments(models, route_backed_ids={7}, exported_at=EXPORTED_AT)
     assert first == second
 
-    flags = [
-        entry["enable_model_route"] for entry in yaml.safe_load(first)["deployments"]
-    ]
+    flags = [entry["enable_model_route"] for entry in yaml.safe_load(first)]
     assert flags == [True, False]
 
 
 @pytest.mark.parametrize(
     "text, message",
     [
-        ("- just\n- a list\n", "must be a mapping"),
-        ("deployments: {}\n", "'deployments' must be a list"),
-        ("deployments: []\nversion: 1\n", "unknown top-level field(s): version"),
-        ("deployments: [\n", "not valid YAML"),
+        # The pre-release wrapper key is just another mapping now.
+        ("deployments:\n- name: a\n", "must be a list of deployments"),
+        ("just a string\n", "must be a list of deployments"),
+        ("\n", "must be a list of deployments"),
+        ("- [\n", "not valid YAML"),
     ],
 )
 def test_load_rejects_a_malformed_document_outright(text, message):
@@ -516,7 +512,6 @@ def test_load_rejects_a_malformed_document_outright(text, message):
 
 def test_load_reports_every_entry_problem_and_keeps_the_good_entries():
     text = """
-deployments:
 - name: good
   source: huggingface
   huggingface_repo_id: org/good
@@ -545,14 +540,14 @@ deployments:
 
     assert [(index, entry.name) for index, entry in loaded.entries] == [(0, "good")]
     # The schema error keeps pydantic's own text; only its label is ours.
-    assert loaded.errors[2].startswith("deployments[1] (broken): replicas: ")
+    assert loaded.errors[2].startswith("deployment[1] (broken): replicas: ")
     assert loaded.errors[:2] + loaded.errors[3:] == [
-        "deployments[1] (broken): server-managed field(s) are not allowed: "
+        "deployment[1] (broken): server-managed field(s) are not allowed: "
         "cluster_id, id, lora_list[0].path",
-        "deployments[1] (broken): unknown field(s): colour, gpu_selector.typo, "
+        "deployment[1] (broken): unknown field(s): colour, gpu_selector.typo, "
         "lora_list[0].colour",
-        "deployments[2] (good): duplicate name, already used by deployments[0]",
-        "deployments[3]: must be a mapping",
+        "deployment[2] (good): duplicate name, already used by deployment[0]",
+        "deployment[3]: must be a mapping",
     ]
 
 
@@ -596,7 +591,7 @@ async def _route_names(session: AsyncSession):
 
 def _entries(response):
     assert response.media_type == "application/x-yaml"
-    return yaml.safe_load(response.body)["deployments"]
+    return yaml.safe_load(response.body)
 
 
 def _body_without_header(response) -> str:
@@ -733,7 +728,6 @@ async def test_import_reports_every_problem_at_once_and_writes_nothing(
             _model_row("taken"),
         )
         document = """
-deployments:
 - name: taken
   source: huggingface
   huggingface_repo_id: org/taken
@@ -757,12 +751,12 @@ deployments:
         with pytest.raises(BadRequestException) as raised:
             await _import(session, ctx, document)
         lines = raised.value.message.split("\n")
-        assert lines[1].startswith("deployments[2] (broken): replicas: ")
+        assert lines[1].startswith("deployment[2] (broken): replicas: ")
         assert lines[:1] + lines[2:] == [
-            "deployments[2] (broken): unknown field(s): colour",
-            "deployments[3] (fine): duplicate name, already used by deployments[1]",
-            "deployments[0] (taken): Model with name 'taken' already exists.",
-            "deployments[4] (bad-params): Setting the port using --port is not "
+            "deployment[2] (broken): unknown field(s): colour",
+            "deployment[3] (fine): duplicate name, already used by deployment[1]",
+            "deployment[0] (taken): Model with name 'taken' already exists.",
+            "deployment[4] (bad-params): Setting the port using --port is not "
             "supported. Ports are automatically allocated by GPUStack.",
         ]
         assert await _count(session, Model.__table__) == 1
@@ -777,7 +771,7 @@ deployments:
         await _seed(session, ModelRoute(name="qwen3-8b:sql", created_model_id=999))
         with pytest.raises(BadRequestException) as raised:
             await _import(session, ctx, DOCUMENT)
-        assert raised.value.message.startswith("deployments[0] (qwen3-8b): LoRA route")
+        assert raised.value.message.startswith("deployment[0] (qwen3-8b): LoRA route")
         assert await _count(session, Model.__table__) == 1
 
 

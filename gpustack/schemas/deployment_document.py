@@ -1,10 +1,10 @@
 """Deployment documents: the YAML a set of model deployments is exported to
 and imported from.
 
-An entry is a ``ModelCreate`` body minus the server-derived and
-environment-bound fields, so a document exported here imports unchanged into
-the same cluster. Only the schema and the dump live here; the routes do the
-visibility checks and the transaction.
+The document is a list of entries. An entry is a ``ModelCreate`` body minus
+the server-derived and environment-bound fields, so a document exported here
+imports unchanged into the same cluster. Only the schema and the dump live
+here; the routes do the visibility checks and the transaction.
 """
 
 from datetime import datetime, timezone
@@ -107,12 +107,10 @@ def dump_deployments(
         f"# Exported from GPUStack v{__version__} "
         f"at {exported_at:%Y-%m-%dT%H:%M:%SZ}\n"
     )
-    document = {
-        "deployments": [
-            deployment_entry(model, model.id in route_backed_ids) for model in models
-        ]
-    }
-    return header + yaml.safe_dump(document, sort_keys=False, allow_unicode=True)
+    entries = [
+        deployment_entry(model, model.id in route_backed_ids) for model in models
+    ]
+    return header + yaml.safe_dump(entries, sort_keys=False, allow_unicode=True)
 
 
 class DeploymentImportRequest(BaseModel):
@@ -130,17 +128,11 @@ class DeploymentImportResult(BaseModel):
     """Created deployments, or on a dry run the entries as they were read."""
 
 
-class _DeploymentDocument(BaseModel):
-    """The top-level shape; anything but ``deployments`` is unknown."""
-
-    deployments: List[Any]
-
-
 class LoadedDeployments(NamedTuple):
     entries: List[Tuple[int, ModelCreate]]
     """Entries that parsed, each with its index in the document."""
     errors: List[str]
-    """One line per problem, labelled ``deployments[i] (<name>): ...``."""
+    """One line per problem, labelled ``deployment[i] (<name>): ...``."""
 
 
 def _validation_error_line(error: Dict[str, Any]) -> str:
@@ -197,35 +189,26 @@ def _lora_runtime_paths(raw: Dict[str, Any]) -> List[str]:
 def load_deployments(text: str) -> LoadedDeployments:
     """Parse a document strictly into ``ModelCreate`` entries.
 
-    A document that is not valid YAML, or not a mapping holding a
-    ``deployments`` list, raises ``ValueError`` at once. Entry problems are
-    collected instead, alongside the entries that did parse, so the route can
-    run its own checks on those and report everything in one pass. Unknown and
-    server-managed fields are errors at every depth, not silently dropped: a
-    document from a newer GPUStack must not lose configuration on the way in.
+    A document that is not valid YAML, or not a list, raises ``ValueError`` at
+    once. Entry problems are collected instead, alongside the entries that did
+    parse, so the route can run its own checks on those and report everything
+    in one pass. Unknown and server-managed fields are errors at every depth,
+    not silently dropped: a document from a newer GPUStack must not lose
+    configuration on the way in.
     """
     try:
-        document = yaml.safe_load(text)
+        raw_entries = yaml.safe_load(text)
     except yaml.YAMLError as e:
         raise ValueError(f"the document is not valid YAML: {e}")
-    if not isinstance(document, dict):
-        raise ValueError("the document must be a mapping with a 'deployments' list")
-    unknown = sorted(unknown_keys(document, _DeploymentDocument))
-    if unknown:
-        raise ValueError(
-            f"unknown top-level field(s): {', '.join(unknown)}; "
-            "only 'deployments' is allowed"
-        )
-    raw_entries = document.get("deployments")
     if not isinstance(raw_entries, list):
-        raise ValueError("'deployments' must be a list")
+        raise ValueError("the document must be a list of deployments")
 
     entries: List[Tuple[int, ModelCreate]] = []
     errors: List[str] = []
     first_index_by_name: Dict[str, int] = {}
     for index, raw in enumerate(raw_entries):
         name = raw.get("name") if isinstance(raw, dict) else None
-        label = f"deployments[{index}] ({name})" if name else f"deployments[{index}]"
+        label = f"deployment[{index}] ({name})" if name else f"deployment[{index}]"
         if not isinstance(raw, dict):
             errors.append(f"{label}: must be a mapping")
             continue
@@ -253,7 +236,7 @@ def load_deployments(text: str) -> LoadedDeployments:
         if entry.name in first_index_by_name:
             errors.append(
                 f"{label}: duplicate name, already used by "
-                f"deployments[{first_index_by_name[entry.name]}]"
+                f"deployment[{first_index_by_name[entry.name]}]"
             )
             continue
         first_index_by_name[entry.name] = index
