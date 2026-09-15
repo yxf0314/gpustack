@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 import yaml
-from sqlalchemy import delete, func
+from sqlalchemy import delete, func, update
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -652,6 +652,19 @@ async def _import(session, ctx, content, cluster_id=1, dry_run=False, **override
     )
 
 
+async def _stop_all(session):
+    """Only a stopped deployment can be overwritten."""
+    await session.exec(update(Model).values(replicas=0))
+    await session.commit()
+
+
+def _stopped(document: str) -> str:
+    """The document with every entry stopped, to match rows _stop_all left."""
+    return document.replace("  replicas: 2\n", "").replace(
+        "  source: huggingface\n", "  source: huggingface\n  replicas: 0\n"
+    )
+
+
 def _plan(result) -> list:
     """The plan as (name, action, changed field names) per entry."""
     return [
@@ -846,6 +859,144 @@ async def test_import_reports_every_problem_on_its_own_entry(engine, no_gpu_look
             await _import(session, ctx, DOCUMENT)
         assert raised.value.message.startswith("deployment[0] (qwen3-8b): LoRA route")
         assert await _count(session, Model.__table__) == 1
+
+
+@pytest.mark.asyncio
+async def test_overwrite_replaces_only_what_was_confirmed(engine, no_gpu_lookup):
+    ctx = _ctx(CUSTOM_ORG_ID)
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        await _seed(
+            session, Cluster(id=2, name="org", owner_principal_id=CUSTOM_ORG_ID)
+        )
+        await _import(session, ctx, DOCUMENT, cluster_id=2)
+        before = await Model.one_by_field(session, "name", "qwen3-8b")
+        identity = (
+            before.id,
+            before.created_at,
+            before.owner_principal_id,
+            before.access_policy,
+            before.cluster_id,
+        )
+
+        # A running deployment is never overwritten, so stop them first, and
+        # drop the GPU pin from the document.
+        await _stop_all(session)
+        edited = _stopped(DOCUMENT).replace(
+            "  gpu_selector:\n    gpu_ids:\n    - worker-1:cuda:0\n", ""
+        )
+
+        # Without the caller's confirmation the overwrite is refused outright.
+        with pytest.raises(BadRequestException) as raised:
+            await _import(session, ctx, edited, cluster_id=2)
+        assert "confirm the overwrite before importing" in raised.value.message
+        after = await Model.one_by_field(session, "name", "qwen3-8b")
+        assert after.gpu_selector is not None
+
+        result = await _import(
+            session, ctx, edited, cluster_id=2, overwrite=["qwen3-8b"]
+        )
+        assert [item.name for item in result.items] == ["qwen3-8b", "bge-m3"]
+        after = await Model.one_by_field(session, "name", "qwen3-8b")
+        # A whole replacement: a field dropped from the document goes back to
+        # its default, returning the deployment to automatic placement.
+        assert after.gpu_selector is None
+        # Tenancy is never written by an import.
+        assert (
+            after.id,
+            after.created_at,
+            after.owner_principal_id,
+            after.access_policy,
+            after.cluster_id,
+        ) == identity
+
+        # Re-applying it now changes nothing, so it needs no confirmation.
+        result = await _import(session, ctx, edited, cluster_id=2)
+        assert {entry.action.value for entry in result.entries} == {"unchanged"}
+
+
+@pytest.mark.asyncio
+async def test_overwrite_settles_the_model_route(engine, no_gpu_lookup):
+    ctx = _ctx(DEFAULT_ORG_ID)
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        await _seed(
+            session, Cluster(id=1, name="c1", owner_principal_id=DEFAULT_ORG_ID)
+        )
+        await _import(session, ctx, DOCUMENT)
+        await _stop_all(session)
+        assert await _route_names(session) == ["qwen3-8b", "qwen3-8b:sql"]
+
+        # A second deployment attached to the same route is not covered by the
+        # "it is stopped" argument, so the route stays put.
+        primary = await ModelRoute.one_by_field(session, "name", "qwen3-8b")
+        (other,) = await _seed(session, _model_row("other"))
+        await _seed(
+            session,
+            ModelRouteTarget(
+                name="other-deployment",
+                route_name=primary.name,
+                route_id=primary.id,
+                model_id=other.id,
+                weight=100,
+            ),
+        )
+        unrouted = _stopped(DOCUMENT).replace("  enable_model_route: true\n", "")
+        result = await _import(session, ctx, unrouted, dry_run=True)
+        assert result.entries[0].errors == [
+            "model route 'qwen3-8b' also targets other deployments; "
+            "detach them before disabling it"
+        ]
+        assert "enable_model_route" in [
+            change.field for change in result.entries[0].changes
+        ]
+
+        # Once it serves only this deployment, disabling it takes the primary
+        # route and its LoRA children with it.
+        await session.exec(
+            delete(ModelRouteTarget).where(ModelRouteTarget.model_id == other.id)
+        )
+        await session.commit()
+        await _import(session, ctx, unrouted, overwrite=["qwen3-8b"])
+        assert await _route_names(session) == []
+
+        # And asking for it back builds it again.
+        await _import(session, ctx, _stopped(DOCUMENT), overwrite=["qwen3-8b"])
+        assert await _route_names(session) == ["qwen3-8b", "qwen3-8b:sql"]
+
+
+@pytest.mark.asyncio
+async def test_overwrite_refuses_a_running_or_foreign_deployment(engine, no_gpu_lookup):
+    ctx = _ctx(DEFAULT_ORG_ID)
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        await _seed(
+            session,
+            Cluster(id=1, name="c1", owner_principal_id=DEFAULT_ORG_ID),
+            Cluster(id=3, name="c3", owner_principal_id=DEFAULT_ORG_ID),
+            _model_row("bge-m3", replicas=3),
+        )
+        running = """
+- name: bge-m3
+  source: huggingface
+  huggingface_repo_id: BAAI/bge-m3
+  replicas: 1
+"""
+        # Whether the document -- or an override -- says zero is irrelevant:
+        # what counts is the row in the database.
+        for kwargs in ({}, {"replica_overrides": {"bge-m3": 0}}):
+            result = await _import(session, ctx, running, dry_run=True, **kwargs)
+            assert result.entries[0].errors == [
+                "already exists and is running (replicas=3); "
+                "stop it before overwriting"
+            ]
+        with pytest.raises(BadRequestException):
+            await _import(session, ctx, running, overwrite=["bge-m3"])
+
+        # Stopped, but living in another cluster: no silent migration.
+        stopped = await Model.one_by_field(session, "name", "bge-m3")
+        await stopped.update(session, {"replicas": 0})
+        result = await _import(session, ctx, running, cluster_id=3, dry_run=True)
+        assert result.entries[0].errors == [
+            "already exists in cluster 1; this import targets cluster 3"
+        ]
 
 
 @pytest.mark.asyncio

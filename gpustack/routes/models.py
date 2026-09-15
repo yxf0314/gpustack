@@ -28,6 +28,7 @@ from gpustack.schemas.models import (
 )
 from gpustack.schemas.cache_services import CacheService
 from gpustack.schemas.deployment_document import (
+    OVERWRITABLE_FIELDS,
     DeploymentActionEnum,
     DeploymentExportRequest,
     DeploymentImportRequest,
@@ -79,6 +80,7 @@ from gpustack.schemas.model_routes import (
 from gpustack.schemas.links import ModelRoutePrincipalLink
 from gpustack.schemas.principals import platform_principal_id
 from gpustack.server.services import (
+    ModelRouteService,
     ModelService,
     WorkerService,
     revoke_model_access_cache,
@@ -1029,7 +1031,16 @@ async def _persist_model_create(
     model: Model = await Model.create(session, source=model_in_dict, auto_commit=False)
     if not model_in.enable_model_route:
         return model
+    await _create_model_route(session, model, grant_owning_org=org_scoped_default)
+    return model
 
+
+async def _create_model_route(
+    session: AsyncSession, model: Model, *, grant_owning_org: bool
+) -> None:
+    """Create the deployment's primary route, its target and its LoRA child
+    routes. Never commits.
+    """
     model_route = ModelRoute(
         name=model.name,
         description=model.description,
@@ -1056,7 +1067,7 @@ async def _persist_model_create(
         source=model_route_target,
         auto_commit=False,
     )
-    if org_scoped_default:
+    if grant_owning_org:
         # Auto-grant the owning Org on the primary route so its
         # members see it out of the box. The route is brand new,
         # so no existence check is needed; LoRA child routes get
@@ -1073,7 +1084,6 @@ async def _persist_model_create(
         access_policy=model.access_policy,
         generic_proxy=model.generic_proxy,
     )
-    return model
 
 
 @router.post(
@@ -1234,6 +1244,53 @@ def _overwrite_blockers(existing: Model, cluster_id: int) -> List[str]:
     return blockers
 
 
+async def _own_model_routes(session: AsyncSession, model: Model) -> List[ModelRoute]:
+    """The live routes this deployment created -- its primary route and its
+    LoRA children. The same test the export reads ``enable_model_route`` off,
+    so what a document says about routes and what an import settles agree."""
+    return list(
+        await ModelRoute.all_by_fields(
+            session, {"created_model_id": model.id, "deleted_at": None}
+        )
+    )
+
+
+async def _route_blockers(
+    session: AsyncSession, existing: Model, model_in: ModelCreate, target_org_id: int
+) -> List[str]:
+    """Why this deployment's routes cannot be brought in line with the entry."""
+    own = await _own_model_routes(session, existing)
+    primary = next((route for route in own if route.name == existing.name), None)
+
+    if model_in.enable_model_route:
+        if primary is not None:
+            return []
+        clash = await ModelRoute.one_by_fields(
+            session, {"name": existing.name, "owner_principal_id": target_org_id}
+        )
+        if clash:
+            return [
+                f"model route '{existing.name}' already exists and was not "
+                "created by this deployment"
+            ]
+        return []
+
+    if primary is None:
+        return []
+    # Dropping the route is safe only because the deployment is stopped --
+    # but another deployment attached to the same route need not be, and
+    # deleting it would cut that one off too.
+    shared = await ModelRouteTarget.all_by_fields(
+        session, {"route_id": primary.id, "deleted_at": None}
+    )
+    if any(target.model_id != existing.id for target in shared):
+        return [
+            f"model route '{primary.name}' also targets other deployments; "
+            "detach them before disabling it"
+        ]
+    return []
+
+
 async def _plan_import(
     session: AsyncSession,
     loaded: List[LoadedEntry],
@@ -1294,6 +1351,9 @@ async def _plan_import(
                 else DeploymentActionEnum.UNCHANGED
             )
             plan.errors.extend(_overwrite_blockers(existing, import_in.cluster_id))
+            plan.errors.extend(
+                await _route_blockers(session, existing, model_in, target_org_id)
+            )
 
         try:
             await _validate_model_spec(session, model_in, target_org_id)
@@ -1356,9 +1416,20 @@ async def import_models(
         )
 
     try:
-        models = await _persist_deployments(session, items, target_org_id)
+        models = await _persist_deployments(
+            session, items, import_in.overwrite, target_org_id
+        )
         await session.commit()
-        if any(item.entry.enable_model_route for item in items if item.entry):
+        # An overwrite can create or drop routes either way, so it always
+        # invalidates; a plain create only when it asked for a route.
+        if any(
+            item.plan.action is DeploymentActionEnum.UPDATE
+            or (
+                item.plan.action is DeploymentActionEnum.CREATE
+                and item.entry.enable_model_route
+            )
+            for item in items
+        ):
             await revoke_model_access_cache(session=session)
     except BadRequestException:
         await session.rollback()
@@ -1377,9 +1448,51 @@ async def import_models(
     )
 
 
+async def _persist_model_update(
+    session: AsyncSession, existing: Model, model_in: ModelCreate
+) -> Model:
+    """Replace ``existing`` with the entry and settle its routes. Never
+    commits.
+
+    A whole replacement, not a merge: the document is the desired state, so a
+    field left out of it goes back to its default -- deleting a
+    ``gpu_selector`` from the file is how a deployment returns to automatic
+    placement. Only the document's own fields are written; see
+    ``OVERWRITABLE_FIELDS`` for why that list is a whitelist.
+    """
+    patch = {field: getattr(model_in, field) for field in OVERWRITABLE_FIELDS}
+    await ModelService(session).update(existing, patch, auto_commit=False)
+
+    own = await _own_model_routes(session, existing)
+    primary = next((route for route in own if route.name == existing.name), None)
+    if not model_in.enable_model_route:
+        # Safe because an overwrite only reaches a stopped deployment, so
+        # nothing is being served through these.
+        for route in own:
+            await ModelRouteService(session).delete(route, auto_commit=False)
+        return existing
+    if primary is None:
+        await _create_model_route(
+            session,
+            existing,
+            grant_owning_org=existing.access_policy
+            == AccessPolicyEnum.ALLOWED_PRINCIPALS,
+        )
+        return existing
+    await create_lora_model_routes(
+        session,
+        existing,
+        access_policy=existing.access_policy,
+        generic_proxy=existing.generic_proxy,
+    )
+    await cleanup_orphan_lora_routes(session, existing)
+    return existing
+
+
 async def _persist_deployments(
     session: AsyncSession,
     items: List[_ImportItem],
+    overwrite: List[str],
     target_org_id: int,
 ) -> List[Model]:
     """Write every entry without committing, and answer with the row each one
@@ -1391,23 +1504,28 @@ async def _persist_deployments(
     """
     models = []
     for item in items:
+        label = entry_label(item.plan.index, item.plan.name)
         if item.plan.action is DeploymentActionEnum.UNCHANGED:
-            # The document already describes this row. Nothing to write.
+            # The document already describes this row. Nothing to write, and
+            # so nothing to confirm either.
             models.append(item.existing)
             continue
-        if item.plan.action is DeploymentActionEnum.UPDATE:
-            raise BadRequestException(
-                message=f"{entry_label(item.plan.index, item.plan.name)}: "
-                "already exists; confirm the overwrite before importing"
-            )
         try:
-            models.append(
-                await _persist_model_create(session, item.entry, target_org_id)
-            )
+            if item.plan.action is DeploymentActionEnum.UPDATE:
+                if item.plan.name not in overwrite:
+                    raise BadRequestException(
+                        message="already exists; confirm the overwrite before "
+                        "importing"
+                    )
+                models.append(
+                    await _persist_model_update(session, item.existing, item.entry)
+                )
+            else:
+                models.append(
+                    await _persist_model_create(session, item.entry, target_org_id)
+                )
         except BadRequestException as e:
-            raise BadRequestException(
-                message=f"{entry_label(item.plan.index, item.plan.name)}: {e.message}"
-            )
+            raise BadRequestException(message=f"{label}: {e.message}")
     return models
 
 

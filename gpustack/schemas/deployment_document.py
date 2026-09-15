@@ -58,6 +58,15 @@ ENTRY_FIELDS: List[str] = ["name"] + [
     if field != "name" and field not in SERVER_MANAGED_FIELDS
 ]
 
+# What an overwrite writes onto the existing row. A whitelist rather than a
+# blacklist on purpose: a ModelCreate dump also carries owner_principal_id and
+# access_policy at their defaults, and writing those would re-home the row to
+# the platform Org and drop the grants scoping it to its own.
+# ``enable_model_route`` is not a column -- it settles routes instead.
+OVERWRITABLE_FIELDS: List[str] = [
+    field for field in ENTRY_FIELDS if field != "enable_model_route"
+]
+
 
 class DeploymentExportRequest(BaseModel):
     ids: Optional[List[int]] = None
@@ -160,6 +169,10 @@ class DeploymentImportRequest(BaseModel):
     """Cluster every entry is created in; the document itself carries none."""
     dry_run: bool = False
     """Plan only, write nothing."""
+    overwrite: List[str] = []
+    """Deployments the caller agreed to replace, by name. An entry that would
+    overwrite one not named here is refused rather than applied: the plan the
+    caller confirmed has to still be the plan being written."""
     replica_overrides: Dict[str, NonNegativeInt] = {}
     """Replica counts to use instead of the document's, by deployment name, so
     one document suits environments of different sizes without being edited."""
