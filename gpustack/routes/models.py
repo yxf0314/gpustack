@@ -2,7 +2,7 @@ import asyncio
 import logging
 import math
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, Union
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import RedirectResponse, StreamingResponse
 from urllib.parse import urlencode
@@ -28,10 +28,17 @@ from gpustack.schemas.models import (
 )
 from gpustack.schemas.cache_services import CacheService
 from gpustack.schemas.deployment_document import (
+    DeploymentActionEnum,
     DeploymentExportRequest,
     DeploymentImportRequest,
     DeploymentImportResult,
+    DeploymentPlanEntry,
+    LoadedEntry,
+    deployment_entry,
+    diff_entries,
     dump_deployments,
+    entry_document_form,
+    entry_label,
     load_deployments,
 )
 from gpustack.schemas.clusters import Cluster
@@ -1173,18 +1180,108 @@ async def export_models(
     )
 
 
+class _ImportItem(NamedTuple):
+    """One document entry: what would happen to it, and what it acts on."""
+
+    plan: DeploymentPlanEntry
+    entry: Optional[ModelCreate]
+    """None when the entry did not parse."""
+    existing: Optional[Model]
+    """The row this entry would replace, if there is one."""
+
+
+def _overwrite_blockers(existing: Model, cluster_id: int) -> List[str]:
+    """Why this deployment cannot be replaced, if it cannot.
+
+    Overwriting is deliberately narrow, because a document is an easy thing to
+    apply by accident: only a stopped deployment, and only in the cluster the
+    import targets. "Stopped" is the product's existing definition, the one
+    the deployment list filters on.
+    """
+    blockers = []
+    if existing.replicas > 0:
+        blockers.append(
+            f"already exists and is running (replicas={existing.replicas}); "
+            "stop it before overwriting"
+        )
+    if existing.cluster_id != cluster_id:
+        blockers.append(
+            f"already exists in cluster {existing.cluster_id}; "
+            f"this import targets cluster {cluster_id}"
+        )
+    return blockers
+
+
+async def _plan_import(
+    session: AsyncSession,
+    loaded: List[LoadedEntry],
+    import_in: DeploymentImportRequest,
+    target_org_id: int,
+) -> List[_ImportItem]:
+    """Work out what importing this document would do, writing nothing.
+
+    Every problem lands on the entry that caused it rather than aborting the
+    pass, so one round trip tells the user about all of them at once.
+
+    Rows are looked up scoped to ``target_org_id``, which is the caller's own
+    Org (or, for an admin with no principal context, the target cluster's).
+    That is the same boundary ``assert_resource_visible`` enforces, so an
+    entry can never name its way onto another Org's deployment.
+    """
+    items: List[_ImportItem] = []
+    for entry in loaded:
+        plan = DeploymentPlanEntry(
+            index=entry.index, name=entry.name, errors=list(entry.errors)
+        )
+        model_in = entry.entry
+        if model_in is None:
+            items.append(_ImportItem(plan, None, None))
+            continue
+
+        model_in.cluster_id = import_in.cluster_id
+        # Snapshot before the checks below normalize LoRA names and the
+        # replica count in place: the diff is against what the user wrote.
+        desired = entry_document_form(model_in)
+        existing = await Model.one_by_fields(
+            session, {"name": model_in.name, "owner_principal_id": target_org_id}
+        )
+        if existing is None:
+            plan.action = DeploymentActionEnum.CREATE
+            try:
+                await _assert_model_name_available(session, model_in, target_org_id)
+            except AlreadyExistsException as e:
+                plan.errors.append(e.message)
+        else:
+            route_backed = await _route_backed_model_ids(session, [existing])
+            plan.changes = diff_entries(
+                deployment_entry(existing, existing.id in route_backed), desired
+            )
+            plan.action = (
+                DeploymentActionEnum.UPDATE
+                if plan.changes
+                else DeploymentActionEnum.UNCHANGED
+            )
+            plan.errors.extend(_overwrite_blockers(existing, import_in.cluster_id))
+
+        try:
+            await _validate_model_spec(session, model_in, target_org_id)
+        except (BadRequestException, NotFoundException) as e:
+            plan.errors.append(e.message)
+        items.append(_ImportItem(plan, model_in, existing))
+    return items
+
+
 @router.post("/import", response_model=DeploymentImportResult)
 async def import_models(
     session: SessionDep,
     ctx: TenantContextDep,
     import_in: DeploymentImportRequest,
-    response: Response,
 ):
-    """Create every deployment in a document, or none of them.
+    """Apply a deployment document, or none of it.
 
-    Parsing, per-entry validation and the checks ``create_model`` runs all
-    finish before the first write; their failures are aggregated into one
-    400 that names each entry. Creation is a single transaction.
+    A dry run always answers with the plan — which entries would be created,
+    which overwritten and how, which are already as the document describes —
+    so the client can show it and ask. Writing is a single transaction.
     """
     try:
         loaded = await asyncio.to_thread(load_deployments, import_in.content)
@@ -1201,25 +1298,24 @@ async def import_models(
         ctx, session, import_in.cluster_id, target_org_id, cluster=cluster
     )
 
-    # The checks normalize entries in place (LoRA prefixes, scaling baseline);
-    # a dry run previews what the user wrote, not the stored form.
-    preview = [entry.model_copy(deep=True) for _, entry in loaded.entries]
-    errors = list(loaded.errors)
-    for index, entry in loaded.entries:
-        entry.cluster_id = import_in.cluster_id
-        try:
-            await _check_model_create(session, ctx, entry, target_org_id, cluster)
-        except (BadRequestException, AlreadyExistsException, NotFoundException) as e:
-            errors.append(f"deployment[{index}] ({entry.name}): {e.message}")
-    if errors:
-        raise BadRequestException(message="\n".join(errors))
+    items = await _plan_import(session, loaded, import_in, target_org_id)
+    plans = [item.plan for item in items]
+    valid = not any(plan.errors for plan in plans)
     if import_in.dry_run:
-        return DeploymentImportResult(dry_run=True, items=preview)
+        return DeploymentImportResult(dry_run=True, valid=valid, entries=plans)
+    if not valid:
+        raise BadRequestException(
+            message="\n".join(
+                f"{entry_label(plan.index, plan.name)}: {error}"
+                for plan in plans
+                for error in plan.errors
+            )
+        )
 
     try:
-        models = await _persist_deployments(session, loaded.entries, target_org_id)
+        models = await _persist_deployments(session, items, target_org_id)
         await session.commit()
-        if any(entry.enable_model_route for _, entry in loaded.entries):
+        if any(item.entry.enable_model_route for item in items if item.entry):
             await revoke_model_access_cache(session=session)
     except BadRequestException:
         await session.rollback()
@@ -1230,30 +1326,44 @@ async def import_models(
         logger.error(f"Failed to import deployments: {e}")
         raise InternalServerErrorException(message="Failed to import deployments")
 
-    response.status_code = 201
     return DeploymentImportResult(
-        dry_run=False, items=[ModelPublic.model_validate(model) for model in models]
+        dry_run=False,
+        valid=True,
+        entries=plans,
+        items=[ModelPublic.model_validate(model) for model in models],
     )
 
 
 async def _persist_deployments(
     session: AsyncSession,
-    entries: List[Tuple[int, ModelCreate]],
+    items: List[_ImportItem],
     target_org_id: int,
 ) -> List[Model]:
-    """Write every entry without committing.
+    """Write every entry without committing, and answer with the row each one
+    settled on, in document order.
 
     A LoRA route name conflict only surfaces while the routes are created, so
     it is relabelled here with the entry it belongs to, like every other error
     the import reports.
     """
     models = []
-    for index, entry in entries:
+    for item in items:
+        if item.plan.action is DeploymentActionEnum.UNCHANGED:
+            # The document already describes this row. Nothing to write.
+            models.append(item.existing)
+            continue
+        if item.plan.action is DeploymentActionEnum.UPDATE:
+            raise BadRequestException(
+                message=f"{entry_label(item.plan.index, item.plan.name)}: "
+                "already exists; confirm the overwrite before importing"
+            )
         try:
-            models.append(await _persist_model_create(session, entry, target_org_id))
+            models.append(
+                await _persist_model_create(session, item.entry, target_org_id)
+            )
         except BadRequestException as e:
             raise BadRequestException(
-                message=f"deployment[{index}] ({entry.name}): {e.message}"
+                message=f"{entry_label(item.plan.index, item.plan.name)}: {e.message}"
             )
     return models
 

@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 import yaml
-from fastapi import Response
 from sqlalchemy import delete, func
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import select
@@ -494,6 +493,39 @@ def test_dump_is_byte_stable_and_infers_the_route_flag_per_model():
     assert flags == [True, False]
 
 
+def test_dump_omits_scheduler_placement_for_an_auto_scheduled_model():
+    """Where the scheduler put a deployment must never reach the document:
+    those GPUs need not exist in the cluster it is imported into. Placement
+    lives on ModelInstance, and only a user writes Model.gpu_selector --
+    a sentinel for both, since neither is enforced by a type."""
+    auto, manual = yaml.safe_load(
+        dump_deployments(
+            [
+                _exported_row(gpu_selector=None, worker_selector={"zone": "a"}),
+                _exported_row(
+                    id=8,
+                    name="manual",
+                    gpu_selector=GPUSelector(
+                        gpu_ids=["worker-1:cuda:0", "worker-1:cuda:1"],
+                        gpus_per_replica=2,
+                    ),
+                ),
+            ],
+            route_backed_ids=set(),
+            exported_at=EXPORTED_AT,
+        )
+    )
+
+    assert "gpu_selector" not in auto
+    assert "gpu_type_selector" not in auto
+    assert auto["worker_selector"] == {"zone": "a"}
+    # A manual pick is the user's own intent, and survives verbatim.
+    assert manual["gpu_selector"] == {
+        "gpu_ids": ["worker-1:cuda:0", "worker-1:cuda:1"],
+        "gpus_per_replica": 2,
+    }
+
+
 @pytest.mark.parametrize(
     "text, message",
     [
@@ -538,17 +570,29 @@ def test_load_reports_every_entry_problem_and_keeps_the_good_entries():
 """
     loaded = load_deployments(text)
 
-    assert [(index, entry.name) for index, entry in loaded.entries] == [(0, "good")]
-    # The schema error keeps pydantic's own text; only its label is ours.
-    assert loaded.errors[2].startswith("deployment[1] (broken): replicas: ")
-    assert loaded.errors[:2] + loaded.errors[3:] == [
-        "deployment[1] (broken): server-managed field(s) are not allowed: "
-        "cluster_id, id, lora_list[0].path",
-        "deployment[1] (broken): unknown field(s): colour, gpu_selector.typo, "
-        "lora_list[0].colour",
-        "deployment[2] (good): duplicate name, already used by deployment[0]",
-        "deployment[3]: must be a mapping",
+    # One entry per document item, in order, whether or not it parsed.
+    assert [(item.index, item.name) for item in loaded] == [
+        (0, "good"),
+        (1, "broken"),
+        (2, "good"),
+        (3, None),
     ]
+    assert [item.entry is not None for item in loaded] == [True, False, False, False]
+    assert loaded[0].label == "deployment[0] (good)"
+    assert loaded[3].label == "deployment[3]"
+
+    # The schema error keeps pydantic's own text; the entry carries it
+    # unlabelled, since the entry it belongs to is right there.
+    broken = loaded[1].errors
+    assert broken[2].startswith("replicas: ")
+    assert broken[:2] + broken[3:] == [
+        "server-managed field(s) are not allowed: cluster_id, id, lora_list[0].path",
+        "unknown field(s): colour, gpu_selector.typo, lora_list[0].colour",
+    ]
+    assert loaded[2].errors == [
+        "duplicate name, already used by deployment[0]",
+    ]
+    assert loaded[3].errors == ["must be a mapping"]
 
 
 def test_attachment_header_fallback_stays_a_well_formed_quoted_string():
@@ -599,16 +643,25 @@ def _body_without_header(response) -> str:
 
 
 async def _import(session, ctx, content, cluster_id=1, dry_run=False):
-    response = Response()
-    result = await import_models(
+    return await import_models(
         session,
         ctx,
         DeploymentImportRequest(
             content=content, cluster_id=cluster_id, dry_run=dry_run
         ),
-        response,
     )
-    return response.status_code, result
+
+
+def _plan(result) -> list:
+    """The plan as (name, action, changed field names) per entry."""
+    return [
+        (
+            entry.name,
+            entry.action and entry.action.value,
+            [change.field for change in entry.changes],
+        )
+        for entry in result.entries
+    ]
 
 
 @pytest.mark.asyncio
@@ -692,9 +745,9 @@ async def test_import_round_trips_an_export(engine, no_gpu_lookup):
             session, Cluster(id=1, name="c1", owner_principal_id=DEFAULT_ORG_ID)
         )
 
-        status, result = await _import(session, ctx, DOCUMENT)
-        assert status == 201
+        result = await _import(session, ctx, DOCUMENT)
         assert result.dry_run is False
+        assert _plan(result) == [("qwen3-8b", "create", []), ("bge-m3", "create", [])]
         assert [item.name for item in result.items] == ["qwen3-8b", "bge-m3"]
         assert [item.cluster_id for item in result.items] == [1, 1]
         # Public form: the LoRA name is bare, as everywhere else in the API.
@@ -704,33 +757,38 @@ async def test_import_round_trips_an_export(engine, no_gpu_lookup):
         assert await _count(session, ModelRouteTarget.__table__) == 2
 
         exported = await export_models(session, ctx, DeploymentExportRequest())
+
+        # Re-importing an export of rows that still exist changes nothing.
+        result = await _import(session, ctx, exported.body.decode(), dry_run=True)
+        assert _plan(result) == [
+            ("qwen3-8b", "unchanged", []),
+            ("bge-m3", "unchanged", []),
+        ]
+
         for table in (ModelRouteTarget, ModelRoute, Model):
             await session.exec(delete(table))
         await session.commit()
         assert await _count(session, Model.__table__) == 0
 
-        status, _ = await _import(session, ctx, exported.body.decode())
-        assert status == 201
+        await _import(session, ctx, exported.body.decode())
         exported_again = await export_models(session, ctx, DeploymentExportRequest())
         assert _body_without_header(exported_again) == _body_without_header(exported)
         assert await _route_names(session) == ["qwen3-8b", "qwen3-8b:sql"]
 
 
 @pytest.mark.asyncio
-async def test_import_reports_every_problem_at_once_and_writes_nothing(
-    engine, no_gpu_lookup
-):
+async def test_import_reports_every_problem_on_its_own_entry(engine, no_gpu_lookup):
     ctx = _ctx(DEFAULT_ORG_ID)
     async with AsyncSession(engine, expire_on_commit=False) as session:
         await _seed(
             session,
             Cluster(id=1, name="c1", owner_principal_id=DEFAULT_ORG_ID),
-            _model_row("taken"),
+            _model_row("running", replicas=1),
         )
         document = """
-- name: taken
+- name: running
   source: huggingface
-  huggingface_repo_id: org/taken
+  huggingface_repo_id: org/running
 - name: fine
   source: huggingface
   huggingface_repo_id: org/fine
@@ -748,22 +806,37 @@ async def test_import_reports_every_problem_at_once_and_writes_nothing(
   backend_parameters:
   - --port=8000
 """
+        result = await _import(session, ctx, document, dry_run=True)
+        assert result.valid is False
+        errors = [entry.errors for entry in result.entries]
+        assert errors[0] == [
+            "already exists and is running (replicas=1); stop it before overwriting"
+        ]
+        assert errors[1] == []
+        assert errors[2][0] == "unknown field(s): colour"
+        assert errors[2][1].startswith("replicas: ")
+        assert errors[3] == ["duplicate name, already used by deployment[1]"]
+        assert errors[4] == [
+            "Setting the port using --port is not supported. Ports are "
+            "automatically allocated by GPUStack."
+        ]
+        assert await _count(session, Model.__table__) == 1
+
+        # Writing the same document is still a 400 — only the preview is
+        # error-free — and it names each entry there.
         with pytest.raises(BadRequestException) as raised:
             await _import(session, ctx, document)
-        lines = raised.value.message.split("\n")
-        assert lines[1].startswith("deployment[2] (broken): replicas: ")
-        assert lines[:1] + lines[2:] == [
-            "deployment[2] (broken): unknown field(s): colour",
-            "deployment[3] (fine): duplicate name, already used by deployment[1]",
-            "deployment[0] (taken): Model with name 'taken' already exists.",
-            "deployment[4] (bad-params): Setting the port using --port is not "
-            "supported. Ports are automatically allocated by GPUStack.",
-        ]
+        assert "deployment[2] (broken): unknown field(s): colour" in (
+            raised.value.message
+        )
         assert await _count(session, Model.__table__) == 1
 
         # A cluster the caller cannot use is one 404, not one error per entry.
         with pytest.raises(NotFoundException):
             await _import(session, ctx, DOCUMENT, cluster_id=42)
+        # A document that is not a list has no plan to show.
+        with pytest.raises(BadRequestException):
+            await _import(session, ctx, "deployments:\n- name: a\n", dry_run=True)
         assert await _count(session, Model.__table__) == 1
 
         # A LoRA route name owned by another model only conflicts while the
@@ -776,25 +849,39 @@ async def test_import_reports_every_problem_at_once_and_writes_nothing(
 
 
 @pytest.mark.asyncio
-async def test_dry_run_validates_without_writing(engine, no_gpu_lookup):
+async def test_dry_run_plans_without_writing(engine, no_gpu_lookup):
     ctx = _ctx(DEFAULT_ORG_ID)
     async with AsyncSession(engine, expire_on_commit=False) as session:
         await _seed(
             session, Cluster(id=1, name="c1", owner_principal_id=DEFAULT_ORG_ID)
         )
 
-        status, result = await _import(session, ctx, DOCUMENT, dry_run=True)
-        assert status == 200
+        result = await _import(session, ctx, DOCUMENT, dry_run=True)
         assert result.dry_run is True
-        assert [item.name for item in result.items] == ["qwen3-8b", "bge-m3"]
-        # The preview is the document as written, not the stored form.
-        assert result.items[0].lora_list[0].lora_name == "sql"
+        assert result.valid is True
+        assert result.items == []
+        assert _plan(result) == [("qwen3-8b", "create", []), ("bge-m3", "create", [])]
         assert await _count(session, Model.__table__) == 0
         assert await _count(session, ModelRoute.__table__) == 0
 
-        status, _ = await _import(session, ctx, DOCUMENT)
-        assert status == 201
+        await _import(session, ctx, DOCUMENT)
         assert await _count(session, Model.__table__) == 2
+
+        # Edit the document and the diff names exactly what would change:
+        # a raised replica count, and a GPU selector deleted outright.
+        edited = DOCUMENT.replace("  replicas: 2", "  replicas: 5").replace(
+            "  gpu_selector:\n    gpu_ids:\n    - worker-1:cuda:0\n", ""
+        )
+        result = await _import(session, ctx, edited, dry_run=True)
+        assert _plan(result) == [
+            ("qwen3-8b", "update", ["gpu_selector"]),
+            ("bge-m3", "update", ["replicas"]),
+        ]
+        (change,) = result.entries[0].changes
+        assert change.current == {"gpu_ids": ["worker-1:cuda:0"]}
+        assert change.desired is None
+        assert result.entries[1].changes[0].current == 2
+        assert result.entries[1].changes[0].desired == 5
 
 
 @pytest.mark.asyncio
@@ -816,8 +903,7 @@ async def test_import_stamps_the_callers_org_and_refuses_foreign_clusters(
 
         # Own cluster: rows are stamped with the Org, scoped to it, and the
         # Org is granted on the route it asked for.
-        status, result = await _import(session, ctx, DOCUMENT, cluster_id=2)
-        assert status == 201
+        result = await _import(session, ctx, DOCUMENT, cluster_id=2)
         assert {item.owner_principal_id for item in result.items} == {CUSTOM_ORG_ID}
         assert {item.access_policy for item in result.items} == {
             AccessPolicyEnum.ALLOWED_PRINCIPALS
