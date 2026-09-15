@@ -913,6 +913,13 @@ async def test_overwrite_replaces_only_what_was_confirmed(engine, no_gpu_lookup)
         result = await _import(session, ctx, edited, cluster_id=2)
         assert {entry.action.value for entry in result.entries} == {"unchanged"}
 
+        # Setting a nested column takes a different path from clearing one.
+        repinned = _stopped(DOCUMENT).replace("worker-1:cuda:0", "worker-2:cuda:3")
+        await _import(session, ctx, repinned, cluster_id=2, overwrite=["qwen3-8b"])
+        session.expire_all()
+        after = await Model.one_by_field(session, "name", "qwen3-8b")
+        assert after.gpu_selector.gpu_ids == ["worker-2:cuda:3"]
+
 
 @pytest.mark.asyncio
 async def test_overwrite_settles_the_model_route(engine, no_gpu_lookup):
