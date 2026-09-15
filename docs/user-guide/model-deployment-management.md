@@ -119,16 +119,21 @@ Export deployments to a YAML file that holds their full configuration, and impor
 
 The browser downloads a YAML file named `<deployment-name>.yaml` for a single deployment, or `gpustack-deployments-<timestamp>.yaml` for several.
 
-The file has a single top-level `deployments` list. Each item is the request body that created the deployment, minus the fields the server generates or that tie it to one environment:
+The file is a list of deployments. Each item is the request body that created the deployment, minus the fields the server generates or that tie it to one environment:
 
 ```yaml
 # Exported from GPUStack v2.3.0 at 2026-09-07T10:00:00Z
-deployments:
 - name: qwen3-8b
   source: huggingface
   huggingface_repo_id: Qwen/Qwen3-8B
-  replicas: 1
-  placement_strategy: spread
+  replicas: 2
+  placement_strategy: binpack
+  worker_selector:
+    zone: a
+  gpu_selector:
+    gpu_ids:
+    - worker-1:cuda:0
+    gpus_per_replica: 1
   backend: vLLM
   backend_version: 0.11.0
   backend_parameters:
@@ -138,8 +143,10 @@ deployments:
   enable_model_route: true
 ```
 
-- **Kept**: everything you configured, including backend parameters, environment variables, GPU and worker selectors, scheduling configuration, speculative decoding, Extended KV Cache, the LoRA list, and whether a model route is created.
+- **Kept**: everything you configured, including backend parameters, environment variables, speculative decoding, Extended KV Cache, the LoRA list, whether a model route is created, and the full scheduling configuration — replicas, placement strategy, CPU offloading, distributed inference, worker selector, GPU selector and scheduled scaling.
 - **Dropped**: IDs, timestamps, runtime state such as ready replicas, metadata derived by the scheduler, the owning cluster and organization, the access policy, and LoRA runtime paths. The server regenerates these on import.
+
+Where a deployment ran is never exported. A deployment scheduled automatically has no `gpu_selector` in the file at all, so importing it schedules it afresh against whatever the target cluster has available. GPUs you picked yourself are your intent rather than a scheduling result, so they are exported as written — see the note on importing into a different cluster below.
 
 !!! warning
 
@@ -147,15 +154,18 @@ deployments:
 
 ### Import Deployments
 
-1. Click the `Deploy Model` button, then select `Import YAML` in the dropdown.
+1. Click the `Deploy Model` button, then select `YAML File` in the dropdown.
 2. Choose the exported YAML file.
 3. Select the target `Cluster`. The file carries no cluster information; every deployment is created in the cluster you pick.
-4. Review the validation result. GPUStack validates the whole file before creating anything; on failure it lists each problem with the entry's position, name, and offending field. Fix the file and import again.
-5. Confirm the import. All entries are created at once; if any one fails, no deployment from the file is created.
+4. Review the plan. Each entry is marked `Create`, `Update` or `Unchanged`, an `Update` lists the fields that would change and their current and new values, and any problem is shown on the entry that caused it. Adjust `Replicas` here if the target environment is a different size from the one the file came from.
+5. Confirm the import. Everything is written at once; if any one entry fails, nothing from the file is written.
 
 The following rules apply when importing:
 
-- An import only creates new deployments. A name that appears twice in the file, or that already belongs to a deployment or model route in the target organization, is rejected. Existing deployments are never overwritten or merged.
+- **Overwriting is deliberate and narrow.** An entry whose name matches an existing deployment replaces it only if you confirm that entry, and only if that deployment is **stopped** and lives in the **target cluster**. Stop a running deployment before overwriting it, and edit a deployment in another cluster there instead — an import never migrates one between clusters.
+- **An overwrite replaces the deployment, it does not merge into it.** The file is the desired state, so a field you delete from it goes back to its default. Removing the `gpu_selector` block is how you return a deployment to automatic scheduling. Entries the plan marks `Unchanged` are not written at all.
+- **Model routes follow `enable_model_route`.** Setting it to `false` on an overwrite deletes the route that deployment created, along with its LoRA child routes. If that route also serves another deployment, the entry is rejected instead — detach the other targets first.
+- **Replicas can be adjusted in the plan**, except where the count is tied to something else: a deployment with hand-picked GPUs (change `gpu_selector.gpu_ids` in the file instead) or one with scheduled scaling enabled (change `scaling_schedule.baseline_replicas`).
 - A field GPUStack does not recognize is rejected rather than silently dropped. This usually means the file came from a newer GPUStack release; remove the field named in the error and retry.
 - When importing into a different cluster, `gpu_ids` under `gpu_selector` and `worker_selector` still refer to the GPUs and workers of the original cluster. Change them to values from the target cluster, or remove them to let the scheduler place the deployment; otherwise the import fails because the GPUs cannot be found.
 
