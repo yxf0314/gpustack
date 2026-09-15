@@ -158,11 +158,12 @@ Where a deployment ran is never exported. A deployment scheduled automatically h
 2. Choose the exported YAML file.
 3. Select the target `Cluster`. The file carries no cluster information; every deployment is created in the cluster you pick.
 4. Review the plan. Each entry is marked `Create`, `Update` or `Unchanged`, an `Update` lists the fields that would change and their current and new values, and any problem is shown on the entry that caused it. Adjust `Replicas` here if the target environment is a different size from the one the file came from.
-5. Confirm the import. Everything is written at once; if any one entry fails, nothing from the file is written.
+5. Tick `Confirm` on every `Update` you want applied. `Import` stays disabled while any overwrite is unconfirmed, so nothing is replaced that you did not agree to individually.
+6. Confirm the import. Everything is written at once; if any one entry fails, nothing from the file is written.
 
 The following rules apply when importing:
 
-- **Overwriting is deliberate and narrow.** An entry whose name matches an existing deployment replaces it only if you confirm that entry, and only if that deployment is **stopped** and lives in the **target cluster**. Stop a running deployment before overwriting it, and edit a deployment in another cluster there instead — an import never migrates one between clusters.
+- **Overwriting is deliberate and narrow.** An entry whose name matches an existing deployment replaces it only if you confirm that entry in the plan, and only if that deployment is **stopped** and lives in the **target cluster**. Stopped means both scaled to zero replicas and no instances left running — scaling down returns immediately but the instances take a moment to shut down, so an import right after may ask you to wait. Edit a deployment in another cluster there instead: an import never migrates one between clusters.
 - **An overwrite replaces the deployment, it does not merge into it.** The file is the desired state, so a field you delete from it goes back to its default. Removing the `gpu_selector` block is how you return a deployment to automatic scheduling. Entries the plan marks `Unchanged` are not written at all.
 - **Model routes follow `enable_model_route`.** Setting it to `false` on an overwrite deletes the route that deployment created, along with its LoRA child routes. If that route also serves another deployment, the entry is rejected instead — detach the other targets first.
 - **Replicas can be adjusted in the plan**, except where the count is tied to something else: a deployment with hand-picked GPUs (change `gpu_selector.gpu_ids` in the file instead) or one with scheduled scaling enabled (change `scaling_schedule.baseline_replicas`).
