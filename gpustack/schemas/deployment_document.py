@@ -25,7 +25,7 @@ from typing import (
 )
 
 import yaml
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, NonNegativeInt, ValidationError
 
 from gpustack import __version__
 from .models import Model, ModelCreate, ModelPublic
@@ -159,7 +159,10 @@ class DeploymentImportRequest(BaseModel):
     cluster_id: int
     """Cluster every entry is created in; the document itself carries none."""
     dry_run: bool = False
-    """Validate only, create nothing."""
+    """Plan only, write nothing."""
+    replica_overrides: Dict[str, NonNegativeInt] = {}
+    """Replica counts to use instead of the document's, by deployment name, so
+    one document suits environments of different sizes without being edited."""
 
 
 class DeploymentActionEnum(str, Enum):
@@ -181,6 +184,9 @@ class DeploymentPlanEntry(BaseModel):
     name: Optional[str] = None
     action: Optional[DeploymentActionEnum] = None
     """None when the entry did not parse, leaving nothing to plan."""
+    desired: Dict[str, Any] = {}
+    """The entry as the document describes it, in the document's own fields —
+    what a client renders the preview row from. Empty when it did not parse."""
     changes: List[DeploymentChange] = []
     """Populated for an overwrite; what replacing the row would alter."""
     errors: List[str] = []

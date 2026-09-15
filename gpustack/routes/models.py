@@ -1190,6 +1190,28 @@ class _ImportItem(NamedTuple):
     """The row this entry would replace, if there is one."""
 
 
+def _apply_replica_override(model_in: ModelCreate, replicas: int) -> List[str]:
+    """Use the caller's replica count for this entry, or say why it cannot be.
+
+    Refused wherever the count is coupled to something a preview table cannot
+    edit alongside it: manual placement fixes replicas against the number of
+    GPUs picked, and a live scaling schedule drives replicas itself, so an
+    override there would be silently written back.
+    """
+    if model_in.gpu_selector and model_in.gpu_selector.gpu_ids:
+        return [
+            "replicas cannot be overridden for a manually scheduled deployment; "
+            "edit gpu_selector.gpu_ids in the document instead"
+        ]
+    if model_in.scaling_schedule and model_in.scaling_schedule.enabled:
+        return [
+            "replicas cannot be overridden while scheduled scaling is enabled; "
+            "edit scaling_schedule.baseline_replicas in the document instead"
+        ]
+    model_in.replicas = replicas
+    return []
+
+
 def _overwrite_blockers(existing: Model, cluster_id: int) -> List[str]:
     """Why this deployment cannot be replaced, if it cannot.
 
@@ -1239,9 +1261,19 @@ async def _plan_import(
             continue
 
         model_in.cluster_id = import_in.cluster_id
+        # Before the snapshot, so an adjusted count shows up in the diff and
+        # is what gets written -- the preview and the write read the same
+        # request.
+        if model_in.name in import_in.replica_overrides:
+            plan.errors.extend(
+                _apply_replica_override(
+                    model_in, import_in.replica_overrides[model_in.name]
+                )
+            )
         # Snapshot before the checks below normalize LoRA names and the
         # replica count in place: the diff is against what the user wrote.
         desired = entry_document_form(model_in)
+        plan.desired = desired
         existing = await Model.one_by_fields(
             session, {"name": model_in.name, "owner_principal_id": target_org_id}
         )
@@ -1287,6 +1319,17 @@ async def import_models(
         loaded = await asyncio.to_thread(load_deployments, import_in.content)
     except ValueError as e:
         raise BadRequestException(message=str(e))
+
+    # A misspelled name would otherwise just not take effect, and the caller
+    # would be told a count they never asked for is what will be written.
+    unmatched = sorted(
+        set(import_in.replica_overrides) - {entry.name for entry in loaded}
+    )
+    if unmatched:
+        raise BadRequestException(
+            message="replica_overrides names no deployment in the document: "
+            f"{', '.join(unmatched)}"
+        )
 
     target_org_id, cluster = await _resolve_target_org(
         ctx, session, import_in.cluster_id

@@ -642,12 +642,12 @@ def _body_without_header(response) -> str:
     return response.body.decode().split("\n", 1)[1]
 
 
-async def _import(session, ctx, content, cluster_id=1, dry_run=False):
+async def _import(session, ctx, content, cluster_id=1, dry_run=False, **overrides):
     return await import_models(
         session,
         ctx,
         DeploymentImportRequest(
-            content=content, cluster_id=cluster_id, dry_run=dry_run
+            content=content, cluster_id=cluster_id, dry_run=dry_run, **overrides
         ),
     )
 
@@ -846,6 +846,71 @@ async def test_import_reports_every_problem_on_its_own_entry(engine, no_gpu_look
             await _import(session, ctx, DOCUMENT)
         assert raised.value.message.startswith("deployment[0] (qwen3-8b): LoRA route")
         assert await _count(session, Model.__table__) == 1
+
+
+@pytest.mark.asyncio
+async def test_replica_overrides_apply_and_refuse_coupled_entries(
+    engine, no_gpu_lookup
+):
+    ctx = _ctx(DEFAULT_ORG_ID)
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        await _seed(
+            session, Cluster(id=1, name="c1", owner_principal_id=DEFAULT_ORG_ID)
+        )
+
+        # An auto-scheduled entry takes the caller's count, and the preview
+        # shows the count that will actually be written.
+        result = await _import(
+            session, ctx, DOCUMENT, dry_run=True, replica_overrides={"bge-m3": 5}
+        )
+        assert result.valid is True
+        assert result.entries[1].desired["replicas"] == 5
+        await _import(session, ctx, DOCUMENT, replica_overrides={"bge-m3": 5})
+        stored = await Model.one_by_field(session, "name", "bge-m3")
+        assert stored.replicas == 5
+
+        # Manual placement fixes replicas against the GPUs picked; a schedule
+        # drives replicas itself. Neither can be overridden from a table.
+        coupled = """
+- name: pinned
+  source: huggingface
+  huggingface_repo_id: org/pinned
+  gpu_selector:
+    gpu_ids:
+    - worker-1:cuda:0
+- name: scheduled
+  source: huggingface
+  huggingface_repo_id: org/scheduled
+  scaling_schedule:
+    enabled: true
+    baseline_replicas: 1
+    rules:
+    - start_cron: 0 8 * * *
+      duration_seconds: 3600
+      replicas: 4
+"""
+        result = await _import(
+            session,
+            ctx,
+            coupled,
+            dry_run=True,
+            replica_overrides={"pinned": 3, "scheduled": 3},
+        )
+        assert result.entries[0].errors == [
+            "replicas cannot be overridden for a manually scheduled deployment; "
+            "edit gpu_selector.gpu_ids in the document instead"
+        ]
+        assert result.entries[1].errors == [
+            "replicas cannot be overridden while scheduled scaling is enabled; "
+            "edit scaling_schedule.baseline_replicas in the document instead"
+        ]
+
+        # A name that matches nothing is a mistake, not a silent no-op.
+        with pytest.raises(BadRequestException) as raised:
+            await _import(
+                session, ctx, DOCUMENT, dry_run=True, replica_overrides={"typo": 1}
+            )
+        assert "names no deployment in the document: typo" in raised.value.message
 
 
 @pytest.mark.asyncio
