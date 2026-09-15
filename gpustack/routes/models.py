@@ -1210,26 +1210,19 @@ class _ImportItem(NamedTuple):
     """The row this entry would replace, if there is one."""
 
 
-def _apply_replica_override(model_in: ModelCreate, replicas: int) -> List[str]:
-    """Use the caller's replica count for this entry, or say why it cannot be.
+def _apply_replica_override(model_in: ModelCreate, replicas: int) -> None:
+    """Use the caller's replica count for this entry.
 
-    Refused wherever the count is coupled to something a preview table cannot
-    edit alongside it: manual placement fixes replicas against the number of
-    GPUs picked, and a live scaling schedule drives replicas itself, so an
-    override there would be silently written back.
+    Held to the same rules as the deploy form, which lets the count be set
+    beside a manual GPU selection and validates the pair afterwards. An
+    enabled scaling schedule is the one case where ``replicas`` is not the
+    user's to set -- ``apply_scaling_schedule_baseline`` recomputes it from
+    the schedule -- so the count lands on ``baseline_replicas``, which is what
+    the form's Replicas field edits in that mode too.
     """
-    if model_in.gpu_selector and model_in.gpu_selector.gpu_ids:
-        return [
-            "replicas cannot be overridden for a manually scheduled deployment; "
-            "edit gpu_selector.gpu_ids in the document instead"
-        ]
-    if model_in.scaling_schedule and model_in.scaling_schedule.enabled:
-        return [
-            "replicas cannot be overridden while scheduled scaling is enabled; "
-            "edit scaling_schedule.baseline_replicas in the document instead"
-        ]
     model_in.replicas = replicas
-    return []
+    if model_in.scaling_schedule and model_in.scaling_schedule.enabled:
+        model_in.scaling_schedule.baseline_replicas = replicas
 
 
 async def _own_model_routes(session: AsyncSession, model: Model) -> List[ModelRoute]:
@@ -1353,10 +1346,8 @@ async def _plan_import(
         # is what gets written -- the preview and the write read the same
         # request.
         if model_in.name in import_in.replica_overrides:
-            plan.errors.extend(
-                _apply_replica_override(
-                    model_in, import_in.replica_overrides[model_in.name]
-                )
+            _apply_replica_override(
+                model_in, import_in.replica_overrides[model_in.name]
             )
         # Snapshot before the checks below normalize LoRA names and the
         # replica count in place: the diff is against what the user wrote.

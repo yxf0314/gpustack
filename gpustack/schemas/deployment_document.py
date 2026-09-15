@@ -124,6 +124,18 @@ def entry_document_form(entry: ModelCreate) -> Dict[str, Any]:
     )
 
 
+def _unset(value: Any) -> bool:
+    """Whether a projected field says nothing is configured.
+
+    The two sides spell that differently. A column stored as NULL is left out
+    of the export, while re-reading the same document materializes the field's
+    ``ModelCreate`` default — an empty ``worker_selector`` against a missing
+    one, an empty ``lora_list`` against no key at all. Both mean unset, so
+    neither may read as a change.
+    """
+    return value is None or value == {} or value == []
+
+
 def diff_entries(
     current: Dict[str, Any], desired: Dict[str, Any]
 ) -> List["DeploymentChange"]:
@@ -133,13 +145,13 @@ def diff_entries(
     diffs against ``None`` — which is exactly what deleting it from the
     document means.
     """
-    return [
-        DeploymentChange(
-            field=field, current=current.get(field), desired=desired.get(field)
-        )
-        for field in ENTRY_FIELDS
-        if current.get(field) != desired.get(field)
-    ]
+    changes: List["DeploymentChange"] = []
+    for field in ENTRY_FIELDS:
+        before, after = current.get(field), desired.get(field)
+        if before == after or (_unset(before) and _unset(after)):
+            continue
+        changes.append(DeploymentChange(field=field, current=before, desired=after))
+    return changes
 
 
 def dump_deployments(

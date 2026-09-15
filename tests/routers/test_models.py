@@ -864,6 +864,7 @@ async def test_import_round_trips_an_export(engine, no_gpu_lookup):
         # Re-importing an export of rows that still exist changes nothing --
         # including while they run, since nothing would be written.
         result = await _import(session, ctx, exported.body.decode(), dry_run=True)
+        print("PLAN", _plan(result))
         assert [entry.action.value for entry in result.entries] == ["unchanged"] * 3
         assert result.valid is True
 
@@ -1160,61 +1161,43 @@ async def test_overwrite_refuses_a_running_or_foreign_deployment(engine, no_gpu_
 
 
 @pytest.mark.asyncio
-async def test_replica_overrides_apply_and_refuse_coupled_entries(
-    engine, no_gpu_lookup
-):
+async def test_replica_overrides_apply_to_every_kind_of_entry(engine, no_gpu_lookup):
     ctx = _ctx(DEFAULT_ORG_ID)
     async with AsyncSession(engine, expire_on_commit=False) as session:
         await _seed(
             session, Cluster(id=1, name="c1", owner_principal_id=DEFAULT_ORG_ID)
         )
 
-        # An auto-scheduled entry takes the caller's count, and the preview
-        # shows the count that will actually be written.
-        result = await _import(
-            session, ctx, DOCUMENT, dry_run=True, replica_overrides={"bge-m3": 5}
-        )
-        assert result.valid is True
-        assert result.entries[1].desired["replicas"] == 5
-        await _import(session, ctx, DOCUMENT, replica_overrides={"bge-m3": 5})
-        stored = await Model.one_by_field(session, "name", "bge-m3")
-        assert stored.replicas == 5
-
-        # Manual placement fixes replicas against the GPUs picked; a schedule
-        # drives replicas itself. Neither can be overridden from a table.
-        coupled = """
-- name: pinned
-  source: huggingface
-  huggingface_repo_id: org/pinned
-  gpu_selector:
-    gpu_ids:
-    - worker-1:cuda:0
-- name: scheduled
-  source: huggingface
-  huggingface_repo_id: org/scheduled
-  scaling_schedule:
-    enabled: true
-    baseline_replicas: 1
-    rules:
-    - start_cron: 0 8 * * *
-      duration_seconds: 3600
-      replicas: 4
-"""
+        # The preview shows the count that will actually be written, for a
+        # manually placed entry (qwen3-8b) as much as an auto-scheduled one.
         result = await _import(
             session,
             ctx,
-            coupled,
+            DOCUMENT,
             dry_run=True,
-            replica_overrides={"pinned": 3, "scheduled": 3},
+            replica_overrides={"qwen3-8b": 3, "bge-m3": 5},
         )
-        assert result.entries[0].errors == [
-            "replicas cannot be overridden for a manually scheduled deployment; "
-            "edit gpu_selector.gpu_ids in the document instead"
-        ]
-        assert result.entries[1].errors == [
-            "replicas cannot be overridden while scheduled scaling is enabled; "
-            "edit scaling_schedule.baseline_replicas in the document instead"
-        ]
+        assert result.valid is True
+        assert [entry.desired["replicas"] for entry in result.entries] == [3, 5]
+        await _import(
+            session, ctx, DOCUMENT, replica_overrides={"qwen3-8b": 3, "bge-m3": 5}
+        )
+        stored = await Model.all_by_fields(session, {})
+        assert {model.name: model.replicas for model in stored} == {
+            "qwen3-8b": 3,
+            "bge-m3": 5,
+        }
+
+        # An enabled schedule owns `replicas`, so the count is what the
+        # schedule falls back to rather than a value it would overwrite.
+        result = await _import(
+            session,
+            ctx,
+            SCHEDULED_ENTRY,
+            dry_run=True,
+            replica_overrides={"scheduled": 3},
+        )
+        assert result.entries[0].desired["scaling_schedule"]["baseline_replicas"] == 3
 
         # A name that matches nothing is a mistake, not a silent no-op.
         with pytest.raises(BadRequestException) as raised:
@@ -1258,6 +1241,15 @@ async def test_dry_run_plans_without_writing(engine, no_gpu_lookup):
         assert change.desired is None
         assert result.entries[1].changes[0].current == 2
         assert result.entries[1].changes[0].desired == 5
+
+        # Picking GPUs by hand submits a null worker_selector, which drops out
+        # of the export and comes back as the schema's empty default. Unset
+        # either way, so re-importing reports no change.
+        await session.exec(update(Model).values(worker_selector=None, categories=None))
+        await session.commit()
+        exported = await export_models(session, ctx, DeploymentExportRequest())
+        result = await _import(session, ctx, exported.body.decode(), dry_run=True)
+        assert [entry.action.value for entry in result.entries] == ["unchanged"] * 2
 
 
 @pytest.mark.asyncio
