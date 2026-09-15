@@ -920,26 +920,14 @@ async def _resolve_target_org(
     return target_org_id, cluster
 
 
-async def _check_model_create(
-    session: AsyncSession,
-    ctx: TenantContext,
-    model_in: ModelCreate,
-    target_org_id: int,
-    cluster: Optional[Cluster],
+async def _assert_model_name_available(
+    session: AsyncSession, model_in: ModelCreate, target_org_id: int
 ) -> None:
-    """Run every pre-insert check for a new model without writing anything.
+    """Reject a name already taken in the target Org.
 
-    Mutates ``model_in`` in place: LoRA names are normalized to the stored
-    ``<base>:<short>`` form and the scaling-schedule baseline is applied.
+    Only a new model has to clear this; overwriting an existing one collides
+    with itself by definition.
     """
-    # The chosen cluster must exist, be visible to the caller, and be owned
-    # by the target Org. In admin "All" mode target_org_id was derived from
-    # the cluster, so the ownership check is trivially satisfied and this
-    # mainly rejects a missing/deleted or non-visible cluster_id.
-    await assert_cluster_belongs_to_org(
-        ctx, session, model_in.cluster_id, target_org_id, cluster=cluster
-    )
-
     # Model & ModelRoute names are unique within their Org. Two Orgs
     # can each have a "llama3" without colliding.
     existing = await Model.one_by_fields(
@@ -959,6 +947,17 @@ async def _check_model_create(
             raise AlreadyExistsException(
                 message=f"Model route with name '{model_in.name}' already exists."
             )
+
+
+async def _validate_model_spec(
+    session: AsyncSession, model_in: ModelCreate, target_org_id: int
+) -> None:
+    """Validate the spec itself, independent of whether it is new or replaces
+    an existing row.
+
+    Mutates ``model_in`` in place: LoRA names are normalized to the stored
+    ``<base>:<short>`` form and the scaling-schedule baseline is applied.
+    """
     await validate_model_in(session, model_in)
     # Server-side assignment, after validation: validation must see the replica
     # count the caller submitted, not the schedule-driven one.
@@ -966,6 +965,28 @@ async def _check_model_create(
     await validate_shared_kv_cache(
         session, model_in, target_org_id, model_in.cluster_id
     )
+
+
+async def _check_model_create(
+    session: AsyncSession,
+    ctx: TenantContext,
+    model_in: ModelCreate,
+    target_org_id: int,
+    cluster: Optional[Cluster],
+) -> None:
+    """Run every pre-insert check for a new model without writing anything.
+
+    Mutates ``model_in`` in place, via :func:`_validate_model_spec`.
+    """
+    # The chosen cluster must exist, be visible to the caller, and be owned
+    # by the target Org. In admin "All" mode target_org_id was derived from
+    # the cluster, so the ownership check is trivially satisfied and this
+    # mainly rejects a missing/deleted or non-visible cluster_id.
+    await assert_cluster_belongs_to_org(
+        ctx, session, model_in.cluster_id, target_org_id, cluster=cluster
+    )
+    await _assert_model_name_available(session, model_in, target_org_id)
+    await _validate_model_spec(session, model_in, target_org_id)
 
 
 async def _persist_model_create(
