@@ -41,6 +41,7 @@ Notlar:
 - Ağırlıklar ve politikalar birbirini dışlar: ya her hedefin ağırlığı olmalı ya da hiçbirinin olmamalıdır. Karma yapılandırma rotayı kullanılamaz yapar; tüm hedeflerin ağırlığını 0'dan büyük veya hepsini 0 olarak ayarlayın.
 - Yedek hedefler hiçbir zaman aday sayılmaz; mod belirlenirken ağırlıkları yok sayılır.
 - Mod, canlı örnek durumunu değil, yapılandırmanın şeklini açıklar; tüm ağırlıklı bir rota, örnekleri kapalıyken `Target Weight` kalır.
+- Hedefin ağırlığı, kullanılabilir hizmet uç noktaları arasında paylaştırılan toplam trafik payını belirtir. Hedef içindeki uç nokta sayısını artırmak, toplam payını artırmaz.
 
 ### Politika Eklentileri { #policy-plugins }
 

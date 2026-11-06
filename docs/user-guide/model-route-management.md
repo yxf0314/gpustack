@@ -37,6 +37,7 @@ Notes:
 - Weights and policies are mutually exclusive: every target must carry a weight, or none of them may. A mixed configuration makes the route unavailable — set every target weight to greater than 0, or all to 0.
 - Fallback targets never count as candidates; their weight is ignored by the mode derivation.
 - The mode describes the configuration's shape, not live instance health — an all-weighted route stays `Target Weight` while its instances are down.
+- A target's weight is its total traffic share, split among its available service endpoints. Adding endpoints within a target does not increase its total share.
 
 ### Policy Plugins
 

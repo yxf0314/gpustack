@@ -76,6 +76,7 @@ nav_translations:
   Integrate with LiteLLM: LiteLLM との連携
   Running DeepSeek R1 671B with Distributed vLLM: 分散 vLLM による DeepSeek R1 671B の実行
   Running Distributed vLLM with the MultiProcessing Backend: MultiProcessing バックエンドによる分散 vLLM の実行
+  Serving Models with Data Parallelism: データ並列によるモデルの提供
   Running DeepSeek R1 671B with Distributed Ascend Mindie: 分散 Ascend MindIE による DeepSeek R1 671B の実行
   Inference On CPUs: CPU 上での推論
   Inference with Tool Calling: ツール呼び出しによる推論

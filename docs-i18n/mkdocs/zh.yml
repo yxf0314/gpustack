@@ -76,6 +76,7 @@ nav_translations:
   Integrate with LiteLLM: 与 LiteLLM 集成
   Running DeepSeek R1 671B with Distributed vLLM: 使用分布式 vLLM 运行 DeepSeek R1 671B
   Running Distributed vLLM with the MultiProcessing Backend: 使用 MultiProcessing 后端运行分布式 vLLM
+  Serving Models with Data Parallelism: 使用数据并行提供模型服务
   Running DeepSeek R1 671B with Distributed Ascend Mindie: 使用分布式昇腾 MindIE 运行 DeepSeek R1 671B
   Inference On CPUs: 在 CPU 上运行推理
   Inference with Tool Calling: 使用工具调用进行推理

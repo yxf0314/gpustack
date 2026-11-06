@@ -28,6 +28,8 @@ Tek bir GPU veya istemleri ve nesilleri kısa olan bir iş yükü, onsuz genelli
 4. İki tarafın farklı olduğu rol başına ayarları geçersiz kılın. Miras olarak kalan her alan, dağıtım düzeyindeki değeri alır, dolayısıyla yalnızca farkların yazılması gerekir.
 5. Kaydet.
 
+Prefill ve Decode için veri paralelliğini ayrı yapılandırın. Tam bir örnek için [Veri paralelliğiyle model sunma](../tutorials/serving-with-data-parallelism.md#deploy-a-vllm-nixl-group) bölümüne bakın.
+
 Yönlendirici sizin için yönetilir: görüntüsü, komutu, eş adresleri ve sağlık yolu, hepsi modun tarifinden gelir, dolayısıyla form bunları istemez. İstediği şey, bir tarifin bilemeyeceği şeydir - yönlendiricinin kendi argümanları ve ortamı - ve platformun türettiği bağlantı argümanları aynı listeye eklenir, böylece ona güvenmek yerine neyin oluşturulduğunu görebilirsiniz. Dokunmadan bıraktığınız bir satır kaydetme sırasında tekrar bırakılır ve sunucu onu oluşturmaya devam eder.
 
 Yönlendirici yapısal olarak tek kopya olduğundan ayarlanacak bir sayı yoktur: bir saniye, önek önbelleğini böler ve gruba iki adres verir.

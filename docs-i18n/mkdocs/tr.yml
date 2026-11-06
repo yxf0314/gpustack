@@ -75,6 +75,7 @@ nav_translations:
   Integrate with LiteLLM: LiteLLM ile entegrasyon
   Running DeepSeek R1 671B with Distributed vLLM: DeepSeek R1 671B'yi Dağıtılmış vLLM ile Çalıştırma
   Running Distributed vLLM with the MultiProcessing Backend: MultiProcessing Arka Ucuyla Dağıtılmış vLLM Çalıştırma
+  Serving Models with Data Parallelism: Veri paralelliğiyle model sunma
   Running DeepSeek R1 671B with Distributed Ascend Mindie: Dağıtılmış Ascend MindIE ile DeepSeek R1 671B Çalıştırma
   Inference On CPUs: CPU'larda Çıkarım
   Inference with Tool Calling: Araç Çağırma ile Çıkarım

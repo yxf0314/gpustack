@@ -51,6 +51,8 @@ usually be faster without it.
    typing.
 5. Save.
 
+Configure data parallelism separately for Prefill and Decode. See [Serving Models with Data Parallelism](../tutorials/serving-with-data-parallelism.md#deploy-a-vllm-nixl-group) for a complete example.
+
 The router is managed for you: its image, command, peer addresses and health
 path all come from the mode's recipe, so the form does not ask for them. What
 it does ask for is what a recipe cannot know — the router's own arguments and

@@ -28,6 +28,8 @@ translation_status: translated
 4. 在两侧需求不同时，覆盖各角色设置。保持继承的字段使用部署级值，因此只需填写不同之处。
 5. 保存。
 
+Prefill 和 Decode 可以分别配置数据并行，完整配置示例见[使用数据并行提供模型服务](../tutorials/serving-with-data-parallelism.md#deploy-a-vllm-nixl-group)。
+
 Router 由平台管理：镜像、命令、对端地址和健康检查路径均来自模式方案，表单无需填写这些信息。需要填写的是方案无法预知的内容，即 router 自身的参数和环境；平台推导的连接参数也会预填到同一列表，便于查看实际生成结果。未修改的行会在保存时再次移除，由 GPUStack Server 继续生成。
 
 Router 在结构上只有一个副本，因此无需设置数量；第二个副本会拆分前缀缓存，并使组具有两个地址。
