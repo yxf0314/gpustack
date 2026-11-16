@@ -11,6 +11,7 @@ from gpustack.api import exceptions, middlewares
 from gpustack.api.auth import BearerTokenAuthenticator
 from gpustack.config.config import Config
 from gpustack import envs
+from gpustack.observability.tracing import inference_tracing
 from gpustack.routes import ui
 from gpustack.routes.routes import api_router, inference_router
 from gpustack.schemas.config import GatewayModeEnum
@@ -32,6 +33,8 @@ logger = logging.getLogger(__name__)
 
 
 def create_app(cfg: Config) -> FastAPI:
+    native_inference = cfg.gateway_mode == GatewayModeEnum.disabled
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.server_config = cfg
@@ -43,9 +46,16 @@ def create_app(cfg: Config) -> FastAPI:
             connector=connector, trust_env=True
         )
         app.state.http_client_no_proxy = aiohttp.ClientSession(connector=connector)
-        yield
-        await app.state.http_client.close()
-        await app.state.http_client_no_proxy.close()
+        try:
+            async with inference_tracing(
+                cfg.trace_otlp_endpoint if native_inference else None, "server"
+            ) as tracer:
+                app.state.inference_tracer = tracer
+                yield
+        finally:
+            app.state.inference_tracer = None
+            await app.state.http_client.close()
+            await app.state.http_client_no_proxy.close()
 
     app = FastAPI(
         title="GPUStack",
@@ -70,7 +80,6 @@ def create_app(cfg: Config) -> FastAPI:
     app.add_middleware(middlewares.RequestTimeMiddleware)
     app.add_middleware(middlewares.ModelUsageMiddleware)
     app.add_middleware(middlewares.RefreshTokenMiddleware)
-    native_inference = cfg.gateway_mode == GatewayModeEnum.disabled
     if cfg.enable_cors:
         app.add_middleware(
             CORSMiddleware,

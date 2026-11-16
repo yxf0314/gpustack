@@ -2,6 +2,7 @@ import json
 import re
 import random
 import asyncio
+from contextlib import aclosing
 from typing import Any, AsyncGenerator, Coroutine, List, Optional, Tuple, Union, Dict
 import aiohttp
 import logging
@@ -27,6 +28,7 @@ from gpustack.api.exceptions import (
 from gpustack.api.responses import StreamingResponseWithStatusCode
 from gpustack import envs
 from gpustack.http_proxy.load_balancer import LoadBalancer
+from gpustack.observability.tracing import current_inference_span, set_span_error
 from gpustack.routes.model_common import build_category_conditions
 from gpustack.schemas.models import Model, servable_instances
 from gpustack.utils.model_instance_workers import (
@@ -346,19 +348,7 @@ async def proxy_request_by_model(
                     raise_on_error=False,
                 ),
             )
-            if result is None:
-                return Response(status_code=499)
-            resp, body = result
-            # The worker's headers must not be forwarded verbatim: aiohttp
-            # hands over an already-decoded body, so a Content-Encoding or
-            # Content-Length from the worker leg describes a body the caller
-            # never receives, and Transfer-Encoding/Connection are hop-by-hop.
-            # Starlette recomputes Content-Length for the body actually sent.
-            return Response(
-                status_code=resp.status,
-                headers=_worker_response_headers(resp.headers),
-                content=body,
-            )
+            return _worker_response(result)
     except HTTPException as exc:
         raise OpenAIAPIException(
             status_code=exc.status_code, reason="InvalidRequest", message=exc.detail
@@ -379,6 +369,21 @@ async def proxy_request_by_model(
             message=error_message,
             is_openai_exception=True,
         )
+
+
+def _worker_response(
+    result: Optional[Tuple[aiohttp.ClientResponse, Optional[bytes]]],
+) -> Response:
+    if result is None:
+        return Response(status_code=499)
+    resp, body = result
+    # aiohttp has decoded the body. Forward only end-to-end headers that
+    # still describe the returned content and let Starlette set its length.
+    return Response(
+        status_code=resp.status,
+        headers=_worker_response_headers(resp.headers),
+        content=body,
+    )
 
 
 async def _request_until_disconnect(
@@ -534,19 +539,23 @@ async def _stream_response(
     """
     yielded_any = False
     try:
-        async for chunk, resp_headers, resp_status in stream_to_worker(
-            worker=worker,
-            method=method,
-            path=path,
-            proxy_client=proxy_client,
-            no_proxy_client=no_proxy_client,
-            data=data,
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=envs.PROXY_TIMEOUT),
-        ):
-            yielded_any = True
-            yield chunk, resp_headers, resp_status
+        async with aclosing(
+            stream_to_worker(
+                worker=worker,
+                method=method,
+                path=path,
+                proxy_client=proxy_client,
+                no_proxy_client=no_proxy_client,
+                data=data,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=envs.PROXY_TIMEOUT),
+            )
+        ) as upstream:
+            async for chunk, resp_headers, resp_status in upstream:
+                yielded_any = True
+                yield chunk, resp_headers, resp_status
     except aiohttp.ClientError as e:
+        set_span_error(current_inference_span(), type(e).__name__)
         logger.error(f"Error streaming from worker {worker.id}: {e}", exc_info=True)
         error_response = OpenAIAPIErrorResponse(
             error=OpenAIAPIError(
@@ -559,6 +568,7 @@ async def _stream_response(
             error_response, yielded_any
         ), {}, status.HTTP_503_SERVICE_UNAVAILABLE
     except Exception as e:
+        set_span_error(current_inference_span(), type(e).__name__)
         logger.error(f"Error streaming from worker {worker.id}: {e}", exc_info=True)
         error_response = OpenAIAPIErrorResponse(
             error=OpenAIAPIError(

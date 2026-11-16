@@ -14,6 +14,8 @@ from typing import (
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse, JSONResponse
 from starlette.background import BackgroundTask
+from starlette.datastructures import Headers
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from gpustack.api.auth import worker_proxy_auth
 from gpustack.api.exceptions import (
@@ -23,6 +25,13 @@ from gpustack.api.exceptions import (
     ErrorResponse,
 )
 from gpustack import envs
+from gpustack.observability.tracing import (
+    current_inference_span,
+    inference_request_id,
+    inject_trace_context,
+    set_span_error,
+    trace_inference_http,
+)
 from gpustack.utils.network import use_proxy_env_for_url
 from gpustack.utils.stall import stall_error_sse
 from gpustack.gateway.utils import router_header_key
@@ -62,6 +71,34 @@ _EVENT_STREAM_CONTENT_TYPE = "text/event-stream"
 
 def _is_event_stream(content_type: Optional[str]) -> bool:
     return _EVENT_STREAM_CONTENT_TYPE in (content_type or "").lower()
+
+
+class WorkerProxyTracingMiddleware:
+    """Trace routed inference across Worker lookup, auth and response relay."""
+
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (
+            scope["type"] != "http"
+            or scope["method"] != "POST"
+            or not scope["path"].startswith(("/v1/", "/proxy/v1/"))
+        ):
+            await self.app(scope, receive, send)
+            return
+        tracer = getattr(scope["app"].state, "inference_tracer", None)
+        headers = Headers(scope=scope)
+        if tracer is None or router_header_key not in headers:
+            await self.app(scope, receive, send)
+            return
+        attributes = {"http.request.method": "POST"}
+        request_id = inference_request_id(headers)
+        if request_id:
+            attributes["gpustack.request_id"] = request_id
+        await trace_inference_http(
+            self.app, scope, receive, send, tracer, "POST inference proxy", attributes
+        )
 
 
 async def _read_first_chunk(
@@ -115,6 +152,7 @@ async def _stream_body(
         except StopAsyncIteration:
             return
         except (asyncio.TimeoutError, TimeoutError):
+            set_span_error(current_inference_span(), "timeout")
             logger.error(
                 f"Upstream stopped sending data for {idle_timeout}s mid-stream, "
                 "terminating the response with an error event"
@@ -227,6 +265,11 @@ async def proxy(path: str, request: Request):  # noqa: C901
             url = f"{url}?{request.url.query}"
         headers = dict(request.headers)
         headers.pop("host", None)
+        span = current_inference_span()
+        inject_trace_context(headers, span)
+        target_instance_id = getattr(request.state, "x_target_instance_id", None)
+        if span.is_recording() and target_instance_id:
+            span.set_attribute("gpustack.model_instance_id", int(target_instance_id))
         # Read the header while popping it: aiohttp sets its own framing, and
         # checking after the pop would never see a chunked upload.
         transfer_encoding = headers.pop("transfer-encoding", "")
@@ -326,7 +369,6 @@ async def proxy(path: str, request: Request):  # noqa: C901
         # Recorded here rather than off the status code alone because an SSE 200
         # arrives before prefill, which would let a wedged instance report
         # itself healthy.
-        target_instance_id = getattr(request.state, "x_target_instance_id", None)
         if resp.status < 400 and target_instance_id:
             record_fn = getattr(request.app.state, "record_successful_inference", None)
             if record_fn:

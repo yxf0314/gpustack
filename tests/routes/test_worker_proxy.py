@@ -19,10 +19,14 @@ import pytest
 from aiohttp import ClientSession, web
 from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from gpustack import envs
 from gpustack.api.auth import worker_proxy_auth
 from gpustack.api.exceptions import register_handlers
+from gpustack.gateway.utils import router_header_key
 from gpustack.routes.worker import proxy as worker_proxy
 from gpustack.utils.stall import stall_error_sse
 
@@ -182,6 +186,80 @@ def _build_worker_app(port: int, instance_id: Optional[int] = None) -> FastAPI:
         return await call_next(request)
 
     return app
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("trace_enabled", "steps", "expected_status", "error"),
+    [
+        (True, [(0, b"data: [DONE]\n\n")], 200, None),
+        (True, [(0, None)], 504, "504"),
+        (True, [(0, b"data: token\n\n"), (0, None)], 200, "timeout"),
+        (False, [(0, b"data: [DONE]\n\n")], 200, None),
+    ],
+)
+async def test_worker_trace_reaches_engine_and_covers_proxy_stream(
+    monkeypatch, trace_enabled, steps, expected_status, error
+):
+    req_id = "00112233-4455-4677-8899-aabbccddeeff"
+    trace_id = "a" * 32
+    incoming_span_id = "b" * 16
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider(shutdown_on_exit=False)
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    app = _build_worker_app(9900, instance_id=7)
+    app.add_middleware(worker_proxy.WorkerProxyTracingMiddleware)
+    tracer = provider.get_tracer(__name__)
+    app.state.inference_tracer = tracer if trace_enabled else None
+    monkeypatch.setattr(envs, "PROXY_TTFT_TIMEOUT", 0.02)
+    monkeypatch.setattr(envs, "PROXY_STREAM_IDLE_TIMEOUT", 0.02)
+
+    def body(_chunk_size):
+        assert not exporter.get_finished_spans()
+        return ScriptedBody(steps)
+
+    upstream = SimpleNamespace(
+        status=200,
+        headers={"content-type": "text/event-stream"},
+        content=SimpleNamespace(iter_chunked=body),
+        close=Mock(),
+    )
+    session = SimpleNamespace(request=AsyncMock(return_value=upstream))
+    app.state.http_client = app.state.http_client_no_proxy = session
+    incoming_traceparent = f"00-{trace_id}-{incoming_span_id}-01"
+    with tracer.start_as_current_span("extension"):
+        async with AsyncClient(
+            transport=ASGITransport(app), base_url="http://worker"
+        ) as client:
+            response = await client.post(
+                "/v1/chat/completions?private=secret",
+                headers={
+                    router_header_key: "routed",
+                    "traceparent": incoming_traceparent,
+                    "x-request-id": req_id,
+                },
+            )
+    provider.shutdown()
+    assert response.status_code == expected_status
+    upstream.close.assert_called()
+    headers = session.request.await_args.kwargs["headers"]
+    assert headers["x-request-id"] == req_id
+    spans = [s for s in exporter.get_finished_spans() if s.name != "extension"]
+    if not trace_enabled:
+        assert spans == []
+        assert headers["traceparent"] == incoming_traceparent
+        return
+    (span,) = spans
+    assert span.parent.span_id == int(incoming_span_id, 16)
+    assert span.attributes["gpustack.request_id"] == req_id
+    assert span.attributes["gpustack.model_instance_id"] == 7
+    assert span.attributes["http.response.status_code"] == expected_status
+    assert span.attributes.get("error.type") == error
+    assert "secret" not in str(dict(span.attributes))
+    assert headers["traceparent"].split("-")[1:3] == [
+        trace_id,
+        f"{span.context.span_id:016x}",
+    ]
 
 
 @asynccontextmanager

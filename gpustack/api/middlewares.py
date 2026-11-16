@@ -21,6 +21,7 @@ from openai.types.create_embedding_response import (
     Usage as EmbeddingUsage,
 )
 from gpustack.api.exceptions import ErrorResponse
+from gpustack.observability.tracing import trace_inference_http, trace_log_fields
 from gpustack.routes.rerank import RerankResponse, RerankUsage
 from gpustack.schemas.images import ImageGenerationChunk, ImagesResponse
 from gpustack.schemas.model_usage import OperationEnum
@@ -73,16 +74,35 @@ class InferenceAccessMiddleware:
                 MutableHeaders(scope=message)[GPUSTACK_REQUEST_ID_HEADER] = request_id
             await send(message)
 
-        try:
-            await self.app(scope, receive, send_with_request_id)
-        finally:
-            access["duration"] = round((time.monotonic() - start) * 1000)
-            inference_access_logger.info(
-                "POST %s %s request_id=%s",
-                path,
-                access.get("response_code", "-"),
-                request_id,
-                extra=access,
+        async def record_access(scope: Scope, receive: Receive, send: Send) -> None:
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                access["duration"] = round((time.monotonic() - start) * 1000)
+                inference_access_logger.info(
+                    "POST %s %s request_id=%s",
+                    path,
+                    access.get("response_code", "-"),
+                    request_id,
+                    extra={**access, **trace_log_fields()},
+                )
+
+        tracer = getattr(scope["app"].state, "inference_tracer", None)
+        if tracer is None:
+            await record_access(scope, receive, send_with_request_id)
+        else:
+            await trace_inference_http(
+                record_access,
+                scope,
+                receive,
+                send_with_request_id,
+                tracer,
+                f"POST {path}",
+                {
+                    "http.request.method": "POST",
+                    "http.route": path,
+                    "gpustack.request_id": request_id,
+                },
             )
 
 

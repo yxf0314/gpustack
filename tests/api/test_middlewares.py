@@ -12,6 +12,10 @@ from uuid import UUID
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.sampling import ALWAYS_ON
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from gpustack.api import middlewares
 from gpustack.api.auth import get_current_user
@@ -78,6 +82,54 @@ def test_native_inference_request_id_on_entry(config, method, path, has_request_
         assert UUID(request_ids[0]).version == 4
     else:
         assert request_ids == []
+
+
+@pytest.mark.parametrize(
+    "traceparent", [None, "invalid", "00-" + "a" * 32 + "-" + "b" * 16 + "-00"]
+)
+def test_native_rejection_has_trace_and_access_log(config, caplog, traceparent):
+    app = create_app(
+        config.model_copy(update={"gateway_mode": GatewayModeEnum.disabled})
+    )
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider(shutdown_on_exit=False, sampler=ALWAYS_ON)
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    app.state.inference_tracer = provider.get_tracer(__name__)
+
+    async def reject():
+        raise HTTPException(status_code=401, detail="sensitive error message")
+
+    app.dependency_overrides[get_current_user] = reject
+    headers = {"Authorization": "sensitive credential", "tracestate": "vendor=secret"}
+    if traceparent is not None:
+        headers["traceparent"] = traceparent
+    with caplog.at_level("INFO", logger="gpustack.inference.access"):
+        response = TestClient(app).post(
+            "/v1/chat/completions?secret=query",
+            headers=headers,
+            json={"secret": "body"},
+        )
+    assert response.status_code == 401
+    (span,) = exporter.get_finished_spans()
+    assert span.attributes["http.response.status_code"] == 401
+    assert (
+        span.attributes["gpustack.request_id"]
+        == response.headers["X-GPUStack-Request-Id"]
+    )
+    if traceparent is not None and traceparent.startswith("00-"):
+        assert span.context.trace_id == int("a" * 32, 16)
+        assert span.parent.span_id == int("b" * 16, 16)
+    else:
+        assert span.parent is None
+    assert span.context.trace_flags.sampled
+    assert not span.context.trace_state
+    assert not span.events
+    assert "secret" not in str(dict(span.attributes))
+    (record,) = [r for r in caplog.records if r.name == "gpustack.inference.access"]
+    assert record.trace_id == f"{span.context.trace_id:032x}"
+    assert record.span_id == f"{span.context.span_id:016x}"
+    assert record.trace_flags & 1
+    provider.shutdown()
 
 
 @pytest.mark.parametrize(
