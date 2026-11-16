@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import pytest
 import yaml
@@ -6,7 +7,6 @@ import yaml
 from gpustack.cmd import prerun
 from gpustack.cmd.prerun import check_ports_availability, prepare_s6_overlay
 from gpustack.config.config import Config
-
 
 HIGRESS_CONFIGMAP_PATH = Path("configmaps/higress-config.yaml")
 HIGRESS_FILTER_PATH = Path("envoyfilters/gpustack-otel-tracing.yaml")
@@ -299,3 +299,35 @@ def test_invalid_otlp_settings_skip_collector_without_logging_secrets(
     assert not prerun.prepare_log_collection(cfg)
     assert not collector_path.exists()
     assert "private" not in caplog.text
+
+
+def test_vllm_pd_logs_keep_native_engine_and_coordinator_ids(collector_path):
+    template = yaml.safe_load(prerun.APPLICATION_LOG_COLLECTOR_TEMPLATE.read_text())
+    receiver = template["receivers"]["filelog/engine"]
+    parsers = {
+        operator["id"]: re.compile(operator["regex"])
+        for operator in receiver["operators"]
+        if operator.get("type") == "regex_parser"
+    }
+    coordinator = (
+        "___prefill_addr_127.0.0.1:8000___decode_addr_[::1]:9000_"
+        "78651a8e19a445a3a3ce157e1578f1d7"
+    )
+    for engine_id in (
+        f"chatcmpl-{coordinator}-b7a64399",
+        f"0_chatcmpl-{coordinator}_0-92309ad8",
+    ):
+        line = f"(APIServer pid=12) INFO 11-16 08:01:00 Added request {engine_id}."
+        assert parsers["vllm_pd_engine_coordinator"].fullmatch(line).groupdict() == {
+            "engine_request_id": engine_id,
+            "pd_coordinator_id": coordinator,
+        }
+
+    router = (
+        "2026-11-16 08:01:00 DEBUG vllm_router_rs::routers::http::vllm_pd_router: "
+        f"src/routers/http/vllm_pd_router.rs:1323: Generated vLLM request ID: {coordinator}"
+    )
+    assert re.match(receiver["multiline"]["line_start_pattern"], router)
+    assert parsers["vllm_pd_router_coordinator"].fullmatch(router).groupdict() == {
+        "pd_coordinator_id": coordinator
+    }

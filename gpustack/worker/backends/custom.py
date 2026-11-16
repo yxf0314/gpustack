@@ -143,6 +143,21 @@ class CustomServer(InferenceServer):
         )
         launch = getattr(self, '_router_launch', None)
         backend_command = bool(launch and launch.uses_backend_command)
+        if (
+            managed_router
+            and launch
+            and launch.source == "recipe"
+            and self._config.log_otlp_endpoint
+            and source_model.disaggregation.mode.value == "sglang-mooncake"
+            and image.rsplit("/", 1)[-1] == "runner:cuda13.0-sglang0.5.22"
+            and not env.get("PYPI_PACKAGES_INSTALL")
+        ):
+            options = {arg.partition("=")[0] for arg in command_args}
+            if "--json-log" not in options:
+                command_args = [*command_args, "--json-log"]
+            if "--log-level" not in options:
+                # The dispatch event is DEBUG without tracing. Keep other targets at INFO.
+                env.setdefault("RUST_LOG", "smg=info,smg::observability::events=debug")
         image_overridden = bool(
             role_backend_field(role, "image_name", source_model.image_name)
             if role

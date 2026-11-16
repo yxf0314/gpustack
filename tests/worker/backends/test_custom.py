@@ -7,6 +7,7 @@ import pytest
 
 from gpustack.schemas.models import DisaggregationSpec, RoleSpec
 from gpustack.server.pd_mode_catalog import load_pd_modes
+from gpustack.utils.pd_router_launch import resolve_router_launch
 from gpustack.worker.backends.custom import CustomServer
 
 
@@ -27,6 +28,9 @@ def create_custom_workload(monkeypatch):
         router_backend=None,
         mode="vllm-nixl",
         definition=None,
+        env=None,
+        log_collection=False,
+        return_container=False,
     ):
         backend = CustomServer.__new__(CustomServer)
         backend._model_spec = SimpleNamespace(
@@ -49,12 +53,10 @@ def create_custom_workload(monkeypatch):
         )
         backend._model.backend_version = None
         backend.inference_backend = definition
-        if definition:
-            from gpustack.utils.pd_router_launch import resolve_router_launch
-
-            backend._router_launch = resolve_router_launch(
-                backend._model_spec, definition
-            )
+        backend._router_launch = resolve_router_launch(backend._model_spec, definition)
+        backend._config = SimpleNamespace(
+            log_otlp_endpoint="http://otel/v1/logs" if log_collection else None
+        )
         backend._model_instance = SimpleNamespace(role=role)
         backend._get_configured_image = lambda: backend._model.image_name
         backend._get_configured_resources = lambda: {}
@@ -74,9 +76,10 @@ def create_custom_workload(monkeypatch):
                 if arguments is not None
                 else ["vllm-router", "--model", "a model", "--port", "40006"]
             ),
-            env={},
+            env=dict(env or {}),
         )
-        return workloads[0].containers[0].execution
+        container = workloads[0].containers[0]
+        return container if return_container else container.execution
 
     return create
 
@@ -97,6 +100,64 @@ def test_managed_router_wraps_the_original_command(create_custom_workload, comma
         "--port",
         "40006",
     ]
+
+
+@pytest.mark.parametrize(
+    "options, json_logs",
+    [
+        ({"log_collection": False}, False),
+        ({"mode": "vllm-nixl"}, False),
+        ({"role": "prefill"}, False),
+        ({"image": "gpustack/runner:cuda13.0-sglang0.5.21"}, False),
+        ({"router_command": "custom-router"}, False),
+        ({"env": {"PYPI_PACKAGES_INSTALL": "sglang-router==0.2.0"}}, False),
+        ({}, True),
+        ({"env": {"RUST_LOG": "smg=warn"}}, True),
+        (
+            {
+                "arguments": [
+                    "python3",
+                    "-m",
+                    "sglang_router.launch_router",
+                    "--log-level=warn",
+                ]
+            },
+            True,
+        ),
+        (
+            {
+                "arguments": [
+                    "python3",
+                    "-m",
+                    "sglang_router.launch_router",
+                    "--json-log",
+                ]
+            },
+            True,
+        ),
+    ],
+)
+def test_managed_sglang_router_request_logging(
+    create_custom_workload, options, json_logs
+):
+    defaults = dict(
+        image="gpustack/runner:cuda13.0-sglang0.5.22",
+        arguments=["python3", "-m", "sglang_router.launch_router"],
+        mode="sglang-mooncake",
+        log_collection=True,
+    )
+    container = create_custom_workload(**{**defaults, **options}, return_container=True)
+
+    env = {item.name: item.value for item in container.envs}
+    args = container.execution.args
+    assert args.count("--json-log") == int(json_logs)
+    assert "--enable-trace" not in args
+    default_filter = (
+        "smg=info,smg::observability::events=debug"
+        if json_logs and "--log-level=warn" not in args
+        else None
+    )
+    assert env.get("RUST_LOG") == options.get("env", {}).get("RUST_LOG", default_filter)
 
 
 def test_router_keeps_the_image_entrypoint(create_custom_workload):

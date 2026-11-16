@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 class _ApplicationLogFormatter(logging.Formatter):
     _fields = (
         "request_id",
+        "pd_coordinator_id",
         "trace_id",
         "span_id",
         "trace_flags",
