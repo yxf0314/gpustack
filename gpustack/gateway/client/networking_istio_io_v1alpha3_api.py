@@ -1,8 +1,12 @@
+from copy import deepcopy
 from enum import Enum
+from urllib.parse import urlsplit
 from kubernetes_asyncio import client
 from kubernetes_asyncio.client import V1ObjectMeta
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
+
+from gpustack.utils.network import is_ipaddress
 
 
 # --- McpBridge Data Structures (Pydantic) ---
@@ -10,6 +14,10 @@ from pydantic import BaseModel, Field
 GROUP = "networking.istio.io"
 VERSION = "v1alpha3"
 PLURAL = "envoyfilters"
+
+_HCM = "envoy.filters.network.http_connection_manager"
+_ROUTER = "envoy.filters.http.router"
+_CLUSTER = "gpustack-otlp-traces"
 
 
 class ApplyToStringEnum(str, Enum):
@@ -340,3 +348,148 @@ def get_ingress_fallback_envoyfilter(
         ),
     )
     return envoyfilter
+
+
+def get_ingress_tracing_envoyfilter(
+    name: str, namespace: str, endpoint: str
+) -> EnvoyFilter:
+    address = urlsplit(f"//{endpoint}")
+    host = address.hostname
+    if is_ipaddress(host):
+        discovery = {"type": "STATIC"}
+    else:
+        discovery = {"type": "STRICT_DNS", "dns_lookup_family": "V4_PREFERRED"}
+
+    cluster = {
+        "name": _CLUSTER,
+        **discovery,
+        "connect_timeout": "1s",
+        "load_assignment": {
+            "cluster_name": _CLUSTER,
+            "endpoints": [
+                {
+                    "lb_endpoints": [
+                        {
+                            "endpoint": {
+                                "address": {
+                                    "socket_address": {
+                                        "address": host,
+                                        "port_value": address.port,
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                }
+            ],
+        },
+        "typed_extension_protocol_options": {
+            "envoy.extensions.upstreams.http.v3.HttpProtocolOptions": {
+                "@type": (
+                    "type.googleapis.com/envoy.extensions.upstreams.http.v3."
+                    "HttpProtocolOptions"
+                ),
+                "explicit_http_config": {"http2_protocol_options": {}},
+            }
+        },
+    }
+    tracing = {
+        "random_sampling": {"value": 100},
+        # Envoy's default http.url tag includes the original path and query.
+        "max_path_tag_length": 0,
+        "custom_tags": [
+            {"tag": "gpustack.request_id", "request_header": {"name": "x-request-id"}}
+        ],
+        "provider": {
+            "name": "envoy.tracers.opentelemetry",
+            "typed_config": {
+                "@type": "type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig",
+                "service_name": "gpustack.higress",
+                "grpc_service": {
+                    "envoy_grpc": {"cluster_name": _CLUSTER},
+                    "timeout": "3s",
+                },
+            },
+        },
+    }
+    request_id_header = {
+        "header": {"key": "x-gpustack-request-id", "value": "%REQ(X-REQUEST-ID)%"},
+        "append_action": "ADD_IF_ABSENT",
+    }
+    return EnvoyFilter.model_validate(
+        {
+            "metadata": {
+                "name": name,
+                "namespace": namespace,
+                "resourceVersion": "1",
+            },
+            "spec": {
+                "configPatches": [
+                    {
+                        "applyTo": "CLUSTER",
+                        "match": {"context": "GATEWAY"},
+                        "patch": {"operation": "ADD", "value": cluster},
+                    },
+                    _merge_http_filter(
+                        "NETWORK_FILTER",
+                        {"name": _HCM},
+                        {
+                            "name": _HCM,
+                            "typed_config": {
+                                "@type": (
+                                    "type.googleapis.com/envoy.extensions.filters.network."
+                                    "http_connection_manager.v3.HttpConnectionManager"
+                                ),
+                                "tracing": tracing,
+                                # Local replies can leave the filter chain before the
+                                # gateway plugin adds the public request ID header.
+                                "local_reply_config": {
+                                    "mappers": [
+                                        {
+                                            "filter": {"not_health_check_filter": {}},
+                                            "headers_to_add": [
+                                                deepcopy(request_id_header)
+                                            ],
+                                        }
+                                    ]
+                                },
+                            },
+                        },
+                    ),
+                    _merge_http_filter(
+                        "HTTP_FILTER",
+                        {"name": _HCM, "subFilter": {"name": _ROUTER}},
+                        {
+                            "name": _ROUTER,
+                            "typed_config": {
+                                "@type": (
+                                    "type.googleapis.com/envoy.extensions.filters.http."
+                                    "router.v3.Router"
+                                ),
+                                "start_child_span": True,
+                            },
+                        },
+                    ),
+                    {
+                        "applyTo": "ROUTE_CONFIGURATION",
+                        "match": {"context": "GATEWAY"},
+                        "patch": {
+                            "operation": "MERGE",
+                            "value": {"response_headers_to_add": [request_id_header]},
+                        },
+                    },
+                ]
+            },
+        }
+    )
+
+
+def _merge_http_filter(apply_to: str, match: dict, value: dict) -> dict:
+    return {
+        "applyTo": apply_to,
+        "match": {
+            "context": "GATEWAY",
+            "listener": {"filterChain": {"filter": match}},
+        },
+        "patch": {"operation": "MERGE", "value": value},
+    }

@@ -36,6 +36,7 @@ receivers:
       service.name: higress
     operators:
       - type: json_parser
+        parse_ints: true
         on_error: drop
         timestamp:
           parse_from: attributes.start_time
@@ -106,10 +107,13 @@ processors:
   transform/higress:
     error_mode: ignore
     log_statements:
+      # Envoy writes the active traceparent when the router dispatches upstream.
+      - merge_maps(log.cache, ExtractPatterns(log.attributes["traceparent"], "^00-(?P<trace_id>[0-9a-f]{32})-(?P<propagated_span_id>[0-9a-f]{16})-01$"), "upsert") where IsString(log.attributes["traceparent"]) and IsString(log.attributes["upstream_host"]) and log.attributes["upstream_host"] != "-"
+      - set(log.trace_id, TraceID(log.cache["trace_id"])) where IsString(log.cache["trace_id"]) and log.cache["trace_id"] != "00000000000000000000000000000000" and log.cache["propagated_span_id"] != "0000000000000000"
       - set(log.body, "Higress access log")
       - keep_keys(log.attributes, ["request_id", "method", "path", "response_code", "duration", "response_flags", "upstream_cluster", "upstream_host"])
       - set(log.attributes["path"], Split(log.attributes["path"], "?")[0]) where IsString(log.attributes["path"])
-      - set(log.body, Concat([log.attributes["method"], log.attributes["path"], log.attributes["response_code"]], " ")) where IsString(log.attributes["method"]) and IsString(log.attributes["path"]) and IsString(log.attributes["response_code"])
+      - set(log.body, Concat([log.attributes["method"], log.attributes["path"], String(log.attributes["response_code"])], " ")) where IsString(log.attributes["method"]) and IsString(log.attributes["path"]) and (IsString(log.attributes["response_code"]) or IsInt(log.attributes["response_code"]))
 
   transform/engine:
     error_mode: ignore

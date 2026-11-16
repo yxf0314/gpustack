@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from shutil import move
 from tempfile import NamedTemporaryFile
-from typing import List, Dict
+from typing import List, Dict, Optional
 from urllib.parse import urlsplit
 
 import yaml
@@ -14,6 +14,9 @@ from gpustack.config.config import Config
 from gpustack.schemas.config import GatewayModeEnum
 from gpustack.envs import MIGRATION_DATA_DIR, DATA_MIGRATION
 from gpustack.logging import setup_logging
+from gpustack.gateway.client.networking_istio_io_v1alpha3_api import (
+    get_ingress_tracing_envoyfilter,
+)
 from gpustack.cmd.start import (
     start_cmd_options,
     parse_args,
@@ -38,6 +41,9 @@ from gpustack.worker.log_export import ENGINE_LOG_EXPORT_DIR
 
 logger = logging.getLogger(__name__)
 APPLICATION_LOG_COLLECTOR_TEMPLATE = Path("/etc/gpustack/logging/collector.yaml")
+HIGRESS_DEFAULT_CONFIG = Path("/etc/gpustack/data/defaultConfig")
+_HIGRESS_CONFIGMAP = "configmaps/higress-config.yaml"
+_HIGRESS_TRACING_FILTER = "gpustack-otel-tracing"
 
 
 def setup_prerun_cmd(subparsers: argparse._SubParsersAction):
@@ -250,6 +256,9 @@ def prepare_gateway_config(cfg: Config):
     higress_embedded_kubeconfig = Path(cfg.higress_base_dir()) / "kubeconfig"
 
     if cfg.gateway_mode == GatewayModeEnum.embedded:
+        _prepare_higress_tracing(
+            higress_embedded_kubeconfig.parent / "apiserver", cfg.trace_otlp_endpoint
+        )
         with open(config_path, "w") as f:
             f.write(f"DATA_DIR={cfg.data_dir}\n")
             f.write(f"LOG_DIR={cfg.log_dir}\n")
@@ -278,6 +287,76 @@ contexts:
 current-context: higress
 """
             )
+
+
+def _write_yaml_atomically(path: Path, content: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, delete=False
+    ) as output:
+        temporary_path = Path(output.name)
+        try:
+            yaml.safe_dump(content, output, sort_keys=False)
+            output.close()
+            temporary_path.replace(path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _set_higress_access_log_context(
+    configmap_path: Path, template: dict, enabled: bool
+) -> None:
+    defaults = yaml.safe_load(template["data"]["mesh"])
+    original_format = defaults["accessLogFormat"]
+    trace_format = original_format.replace(
+        '"trace_id":"%REQ(X-B3-TRACEID)%"',
+        '"traceparent":"%REQ(TRACEPARENT):55%"',
+    )
+    original = (defaults["accessLogEncoding"], original_format.strip())
+    traced = ("JSON", trace_format.strip())
+
+    configmap = (
+        yaml.safe_load(configmap_path.read_text())
+        if configmap_path.exists()
+        else template
+    )
+    mesh = yaml.safe_load(configmap["data"]["mesh"])
+    current = (
+        mesh.get("accessLogEncoding"),
+        (mesh.get("accessLogFormat") or "").strip(),
+    )
+
+    # Switch the managed format only. Other MeshConfig fields and operator
+    # access-log formats belong to the persistent Higress configuration.
+    if enabled and current == original:
+        mesh.update(accessLogEncoding="JSON", accessLogFormat=trace_format)
+    elif not enabled and current == traced:
+        mesh.update(accessLogEncoding=original[0], accessLogFormat=original_format)
+    else:
+        return
+
+    configmap["data"]["mesh"] = yaml.safe_dump(mesh, sort_keys=False)
+    _write_yaml_atomically(configmap_path, configmap)
+
+
+def _prepare_higress_tracing(apiserver_dir: Path, endpoint: Optional[str]) -> None:
+    """Configure the embedded gateway before the file-backed API server starts."""
+    configmap_path = apiserver_dir / _HIGRESS_CONFIGMAP
+    filter_path = apiserver_dir / "envoyfilters" / f"{_HIGRESS_TRACING_FILTER}.yaml"
+    if not endpoint:
+        filter_path.unlink(missing_ok=True)
+        if not configmap_path.exists():
+            return
+
+    template = yaml.safe_load((HIGRESS_DEFAULT_CONFIG / _HIGRESS_CONFIGMAP).read_text())
+    if endpoint:
+        resource = get_ingress_tracing_envoyfilter(
+            _HIGRESS_TRACING_FILTER, template["metadata"]["namespace"], endpoint
+        )
+        _write_yaml_atomically(
+            filter_path, resource.model_dump(mode="json", exclude_none=True)
+        )
+    _set_higress_access_log_context(configmap_path, template, bool(endpoint))
 
 
 def _otlp_logs_exporter(cfg: Config) -> dict:
@@ -355,18 +434,8 @@ def prepare_log_collection(cfg: Config) -> bool:
             del config["service"]["pipelines"]["logs/higress"]
         config["exporters"]["otlp_http/logs"].update(exporter)
 
-        path.parent.mkdir(parents=True, exist_ok=True)
         # The generated config can contain credentials. The temporary file has mode 0600.
-        with NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, delete=False
-        ) as output:
-            temporary_path = Path(output.name)
-            try:
-                yaml.safe_dump(config, output, sort_keys=False)
-                output.close()
-                temporary_path.replace(path)
-            finally:
-                temporary_path.unlink(missing_ok=True)
+        _write_yaml_atomically(path, config)
     except (OSError, TypeError, KeyError, ValueError, yaml.YAMLError) as exc:
         logger.error("Unable to enable application log collection: %s", exc)
         return False
