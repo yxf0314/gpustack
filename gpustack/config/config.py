@@ -21,6 +21,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SecretStr,
     field_validator,
     model_validator,
 )
@@ -374,6 +375,9 @@ class Config(WorkerConfig, BaseSettings):
     shuihua_api_base_url: str = "https://hub.do.top"
 
     disable_builtin_observability: bool = False
+    log_otlp_endpoint: Optional[str] = Field(default=None, repr=False)
+    log_otlp_authorization: Optional[SecretStr] = Field(default=None, repr=False)
+    log_otlp_ca_file: Optional[str] = None
     builtin_prometheus_port: int = 19090
     prometheus_url: Optional[str] = None
     builtin_grafana_port: int = 13000

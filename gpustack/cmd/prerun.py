@@ -1,10 +1,15 @@
 import os
 import sys
 import argparse
+from glob import escape as escape_glob
 import logging
 from pathlib import Path
 from shutil import move
+from tempfile import NamedTemporaryFile
 from typing import List, Dict
+from urllib.parse import urlsplit
+
+import yaml
 from gpustack.config.config import Config
 from gpustack.schemas.config import GatewayModeEnum
 from gpustack.envs import MIGRATION_DATA_DIR, DATA_MIGRATION
@@ -25,11 +30,13 @@ from gpustack.utils.s6_services import (
     postgres_services,
     migration_services,
     observability_services,
+    log_collection_services,
     all_services,
     gpustack_service_name,
 )
 
 logger = logging.getLogger(__name__)
+APPLICATION_LOG_COLLECTOR_TEMPLATE = Path("/etc/gpustack/logging/collector.yaml")
 
 
 def setup_prerun_cmd(subparsers: argparse._SubParsersAction):
@@ -57,7 +64,9 @@ def run(args: argparse.Namespace):
             "Starting pre-run checks and setup s6-overlay configuration for GPUStack..."
         )
         s6_base_path = args.s6_base_path or "/etc/s6-overlay/s6-rc.d"
-        enabled_services = determine_enabled_services(cfg)
+        enabled_services = determine_enabled_services(
+            cfg, logs_active=prepare_log_collection(cfg)
+        )
         # migrate hardcode postgres data dir if needed for determining dependency services
         migrate_hardcode_postgres_data_and_password(cfg, enabled_services)
         dependency_services = determine_dependency_services(cfg)
@@ -270,6 +279,87 @@ current-context: higress
             )
 
 
+def _otlp_logs_exporter(cfg: Config) -> dict:
+    endpoint = cfg.log_otlp_endpoint or ""
+    try:
+        url = urlsplit(endpoint)
+        port = url.port
+    except ValueError:
+        raise ValueError("Invalid OTLP logs URL") from None
+    if (
+        url.scheme not in ("http", "https")
+        or not url.hostname
+        or not url.path
+        or url.username is not None
+        or url.query
+        or url.fragment
+        or port == 0
+        or any(character.isspace() for character in endpoint)
+    ):
+        raise ValueError("Expected a full OTLP/HTTP logs URL without credentials")
+
+    authorization = (
+        cfg.log_otlp_authorization.get_secret_value()
+        if cfg.log_otlp_authorization
+        else ""
+    )
+    if (authorization or cfg.log_otlp_ca_file) and url.scheme != "https":
+        raise ValueError("OTLP log authentication and custom CAs require HTTPS")
+    if any(ord(character) < 32 or ord(character) == 127 for character in authorization):
+        raise ValueError("Invalid OTLP Authorization header")
+
+    # Collector expands dollar signs in its own configuration.
+    exporter = {"logs_endpoint": endpoint.replace("$", "$$")}
+    if authorization:
+        exporter["headers"] = {"Authorization": authorization.replace("$", "$$")}
+    if cfg.log_otlp_ca_file:
+        exporter["tls"] = {"ca_file": cfg.log_otlp_ca_file.replace("$", "$$")}
+    return exporter
+
+
+def prepare_log_collection(cfg: Config) -> bool:
+    """Generate the per-container Collector config when log export is configured."""
+    path = (
+        Path(os.getenv("GPUSTACK_RUN_DIR", "/run/gpustack")) / "logging/collector.yaml"
+    )
+    try:
+        path.unlink(missing_ok=True)
+        if not cfg.log_otlp_endpoint:
+            return False
+
+        exporter = _otlp_logs_exporter(cfg)
+        config = yaml.safe_load(APPLICATION_LOG_COLLECTOR_TEMPLATE.read_text())
+        config["extensions"]["file_storage"]["directory"] = str(
+            Path(cfg.data_dir) / "log-collector"
+        ).replace("$", "$$")
+        directory = escape_glob(str(Path(cfg.log_dir) / "application")).replace(
+            "$", "$$"
+        )
+        config["receivers"]["filelog/application"]["include"] = [
+            f"{directory}/{role}.jsonl{suffix}"
+            for role in ("server", "worker")
+            for suffix in ("", ".[12]")
+        ]
+        config["exporters"]["otlp_http/logs"].update(exporter)
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # The generated config can contain credentials. The temporary file has mode 0600.
+        with NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, delete=False
+        ) as output:
+            temporary_path = Path(output.name)
+            try:
+                yaml.safe_dump(config, output, sort_keys=False)
+                output.close()
+                temporary_path.replace(path)
+            finally:
+                temporary_path.unlink(missing_ok=True)
+    except (OSError, TypeError, KeyError, ValueError, yaml.YAMLError) as exc:
+        logger.error("Unable to enable application log collection: %s", exc)
+        return False
+    return True
+
+
 def prepare_observability_config(cfg: Config):
     env_config_path = prepare_env("GPUSTACK_OBSERVABILITY_CONFIG", "observability")
     with open(env_config_path, "w") as f:
@@ -400,7 +490,7 @@ datasources:
     )
 
 
-def determine_enabled_services(cfg: Config) -> List[str]:
+def determine_enabled_services(cfg: Config, logs_active: bool = False) -> List[str]:
     services = []
     # embedded database
     if cfg.database_url is None and cfg.server_role() in [
@@ -416,6 +506,8 @@ def determine_enabled_services(cfg: Config) -> List[str]:
     # embedded observability
     if use_builtin_grafana(cfg):
         services.extend(observability_services.all_services())
+    if logs_active:
+        services.extend(log_collection_services.all_services())
 
     return services
 

@@ -1,0 +1,62 @@
+extensions:
+  file_storage:
+    create_directory: true
+
+receivers:
+  filelog/application:
+    start_at: end
+    storage: file_storage
+    max_log_size: 10MiB
+    operators:
+      - type: json_parser
+        on_error: drop
+        parse_ints: true
+        timestamp:
+          parse_from: attributes.timestamp
+          layout_type: gotime
+          layout: '2006-01-02T15:04:05Z07:00'
+        severity:
+          parse_from: attributes.severity
+          overwrite_text: true
+      - type: move
+        from: attributes.service
+        to: resource["service.name"]
+      - type: move
+        from: attributes.message
+        to: body
+      - type: move
+        if: attributes.exception != nil
+        from: attributes.exception
+        to: attributes["exception.stacktrace"]
+
+processors:
+  transform/application:
+    error_mode: ignore
+    log_statements:
+      - set(log.trace_id, TraceID(log.attributes["trace_id"])) where IsString(log.attributes["trace_id"]) and IsMatch(log.attributes["trace_id"], "^[0-9a-fA-F]{32}$")
+      - set(log.span_id, SpanID(log.attributes["span_id"])) where IsString(log.attributes["span_id"]) and IsMatch(log.attributes["span_id"], "^[0-9a-fA-F]{16}$")
+      - set(log.flags, log.attributes["trace_flags"]) where IsInt(log.attributes["trace_flags"]) and log.attributes["trace_flags"] >= 0 and log.attributes["trace_flags"] <= 255
+      - delete_key(log.attributes, "timestamp")
+      - delete_key(log.attributes, "severity")
+      - delete_key(log.attributes, "trace_id")
+      - delete_key(log.attributes, "span_id")
+      - delete_key(log.attributes, "trace_flags")
+
+exporters:
+  otlp_http/logs:
+    sending_queue:
+      sizer: bytes
+      queue_size: 16777216 # 16 MiB
+    retry_on_failure:
+      max_elapsed_time: 300s
+
+service:
+  telemetry:
+    metrics:
+      level: none
+  extensions: [file_storage]
+  pipelines:
+    logs:
+      receivers: [filelog/application]
+      processors: [transform/application]
+      exporters: [otlp_http/logs]
