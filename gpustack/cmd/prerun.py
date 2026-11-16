@@ -34,6 +34,7 @@ from gpustack.utils.s6_services import (
     all_services,
     gpustack_service_name,
 )
+from gpustack.worker.log_export import ENGINE_LOG_EXPORT_DIR
 
 logger = logging.getLogger(__name__)
 APPLICATION_LOG_COLLECTOR_TEMPLATE = Path("/etc/gpustack/logging/collector.yaml")
@@ -332,14 +333,26 @@ def prepare_log_collection(cfg: Config) -> bool:
         config["extensions"]["file_storage"]["directory"] = str(
             Path(cfg.data_dir) / "log-collector"
         ).replace("$", "$$")
-        directory = escape_glob(str(Path(cfg.log_dir) / "application")).replace(
-            "$", "$$"
-        )
-        config["receivers"]["filelog/application"]["include"] = [
-            f"{directory}/{role}.jsonl{suffix}"
+        directory = escape_glob(str(Path(cfg.log_dir))).replace("$", "$$")
+        receivers = config["receivers"]
+        receivers["filelog/application"]["include"] = [
+            f"{directory}/application/{role}.jsonl{suffix}"
             for role in ("server", "worker")
             for suffix in ("", ".[12]")
         ]
+        receivers["filelog/engine"]["include"] = [
+            f"{directory}/{ENGINE_LOG_EXPORT_DIR}/archives/*/{name}{suffix}"
+            for name in ("container.log", "container.workload-*.log")
+            for suffix in ("", ".[0-9]*")
+        ]
+        if cfg.gateway_mode == GatewayModeEnum.embedded:
+            receivers["filelog/higress"]["include"] = [
+                f"{directory}/higress/access.log{suffix}" for suffix in ("", ".[1-5]")
+            ]
+        else:
+            del receivers["filelog/higress"]
+            del config["processors"]["transform/higress"]
+            del config["service"]["pipelines"]["logs/higress"]
         config["exporters"]["otlp_http/logs"].update(exporter)
 
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -485,7 +498,7 @@ datasources:
     isDefault: true
     access: proxy
     editable: true
-    orgId: 1
+  orgId: 1
 """
     )
 

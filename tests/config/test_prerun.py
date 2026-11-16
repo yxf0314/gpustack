@@ -95,11 +95,33 @@ def test_log_collector_is_independent_of_builtin_observability(
     assert rendered["receivers"]["filelog/application"]["operators"][0]["parse_ints"]
     assert str(tmp_path / "logs/application/server.jsonl") in include
     assert str(tmp_path / "logs/application/worker.jsonl") in include
+    assert "filelog/higress" not in rendered["receivers"]
+    assert "logs/higress" not in rendered["service"]["pipelines"]
+    assert rendered["receivers"]["filelog/engine"]["include"] == [
+        str(tmp_path / f"logs/engine-export/archives/*/{name}{suffix}")
+        for name in ("container.log", "container.workload-*.log")
+        for suffix in ("", ".[0-9]*")
+    ]
     exporter = rendered["exporters"]["otlp_http/logs"]
     assert exporter["logs_endpoint"] == "https://collector.example/v1/logs"
     assert exporter["headers"] == {"Authorization": "Bearer literal$$token"}
     assert exporter["sending_queue"]["queue_size"] == 16 * 1024**2
     assert exporter["retry_on_failure"]["max_elapsed_time"] == "300s"
+
+
+def test_embedded_gateway_adds_rotating_access_log(tmp_path, collector_path):
+    cfg = Config(
+        data_dir=str(tmp_path / "data"),
+        log_dir=str(tmp_path / "logs"),
+        gateway_mode="embedded",
+        log_otlp_endpoint="http://collector/v1/logs",
+    )
+    assert prerun.prepare_log_collection(cfg)
+    rendered = yaml.safe_load(collector_path.read_text())
+    assert rendered["receivers"]["filelog/higress"]["include"] == [
+        str(tmp_path / "logs/higress/access.log"),
+        str(tmp_path / "logs/higress/access.log.[1-5]"),
+    ]
 
 
 def test_disabled_collector_removes_stale_config_and_service(tmp_path, collector_path):

@@ -29,6 +29,67 @@ receivers:
         from: attributes.exception
         to: attributes["exception.stacktrace"]
 
+  filelog/higress:
+    start_at: end
+    storage: file_storage
+    resource:
+      service.name: higress
+    operators:
+      - type: json_parser
+        on_error: drop
+        timestamp:
+          parse_from: attributes.start_time
+          layout_type: gotime
+          layout: '2006-01-02T15:04:05Z07:00'
+      - type: filter
+        expr: 'attributes.path == nil or attributes.path matches "^/(healthz|livez|readyz|metrics)([/?]|$)"'
+
+  filelog/engine:
+    start_at: beginning
+    storage: file_storage
+    include_file_path: true
+    resource:
+      service.name: gpustack.engine
+    multiline:
+      line_start_pattern: '^(?:\[[0-9]{4}-[0-9]{2}-[0-9]{2} |(?:\([^)]*\) )?(?:TRACE|DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL)[: ]|\{\s*")'
+    operators:
+      - type: regex_parser
+        id: engine_archive_identity
+        parse_from: attributes["log.file.path"]
+        on_error: drop
+        regex: '/engine-export/archives/(?P<cluster_id>[0-9]+)\.(?P<worker_id>[0-9]+)\.(?P<model_id>[0-9]+)\.(?P<model_instance_id>[0-9]+)\.(?P<restart_count>[0-9]+)\.(?P<role>[A-Za-z0-9_-]+)\.[0-9]+/container(?:\.workload-[0-9a-f]{64})?\.log(?:\.[0-9]+)?$'
+      # Reject standalone continuation fragments when filelog splits a large record.
+      # Known request formats can contain prompts, output or headers.
+      - type: filter
+        expr: >-
+          not (body matches '^(?:[[][0-9]{4}-[0-9]{2}-[0-9]{2} |(?:[(][^)]*[)] )?(?:TRACE|DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL)[: ]|[{][[:space:]]*")') or
+          body contains "Received request " or body contains "Generated response " or
+          body contains "details: prompt:" or body contains "details: output_token_ids:" or
+          body contains " JSON body:" or body contains "Receive: obj=" or
+          body contains "Receive OpenAI: obj=" or body contains "Finish: obj="
+      - type: regex_parser
+        id: vllm_engine_request
+        if: 'body contains "Added request "'
+        regex: '^(?:\([^)]*\) )?INFO\s+[^\r\n]*?\sAdded request (?P<engine_request_id>[A-Za-z0-9_.:-]{1,256})\.(?:\r?\n|$)'
+        on_error: send_quiet
+      - type: regex_parser
+        id: vllm_platform_request
+        if: attributes.engine_request_id != nil
+        parse_from: attributes.engine_request_id
+        regex: '^(?:[0-9]+_)?(?:[A-Za-z]+-)?(?P<request_id>[0-9a-fA-F]{32}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})(?:-[0-9a-fA-F]{8})?$'
+        on_error: send_quiet
+      - type: regex_parser
+        id: sglang_request_event
+        if: >-
+          body matches '"event"[[:space:]]*:[[:space:]]*"request[.](received([.]openai)?|finished)"'
+        regex: '^(?:\[[^\r\n\]]+\] )?(?P<engine_json>\{[^\r\n]+\})'
+        on_error: drop
+      - type: json_parser
+        if: attributes.engine_json != nil
+        parse_from: attributes.engine_json
+        parse_to: attributes.engine_record
+        on_error: drop
+
 processors:
   transform/application:
     error_mode: ignore
@@ -41,6 +102,25 @@ processors:
       - delete_key(log.attributes, "trace_id")
       - delete_key(log.attributes, "span_id")
       - delete_key(log.attributes, "trace_flags")
+
+  transform/higress:
+    error_mode: ignore
+    log_statements:
+      - set(log.body, "Higress access log")
+      - keep_keys(log.attributes, ["request_id", "method", "path", "response_code", "duration", "response_flags", "upstream_cluster", "upstream_host"])
+      - set(log.attributes["path"], Split(log.attributes["path"], "?")[0]) where IsString(log.attributes["path"])
+      - set(log.body, Concat([log.attributes["method"], log.attributes["path"], log.attributes["response_code"]], " ")) where IsString(log.attributes["method"]) and IsString(log.attributes["path"]) and IsString(log.attributes["response_code"])
+
+  transform/engine:
+    error_mode: ignore
+    log_statements:
+      - delete_key(log.attributes, "log.file.path")
+      - set(log.body, "SGLang request event") where log.attributes["engine_record"] != nil
+      - set(log.body, log.attributes["engine_record"]["event"]) where IsString(log.attributes["engine_record"]["event"]) and IsMatch(log.attributes["engine_record"]["event"], "^request[.](received([.]openai)?|finished)$")
+      - set(log.attributes["engine_request_id"], log.attributes["engine_record"]["rid"]) where IsString(log.attributes["engine_record"]["rid"]) and IsMatch(log.attributes["engine_record"]["rid"], "^[A-Za-z0-9_.:-]{1,256}$")
+      - set(log.attributes["request_id"], log.attributes["engine_record"]["headers"]["x-request-id"]) where IsString(log.attributes["engine_record"]["headers"]["x-request-id"]) and IsMatch(log.attributes["engine_record"]["headers"]["x-request-id"], "^[0-9a-fA-F]{32}$|^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
+      - delete_key(log.attributes, "engine_record")
+      - delete_key(log.attributes, "engine_json")
 
 exporters:
   otlp_http/logs:
@@ -59,4 +139,12 @@ service:
     logs:
       receivers: [filelog/application]
       processors: [transform/application]
+      exporters: [otlp_http/logs]
+    logs/higress:
+      receivers: [filelog/higress]
+      processors: [transform/higress]
+      exporters: [otlp_http/logs]
+    logs/engine:
+      receivers: [filelog/engine]
+      processors: [transform/engine]
       exporters: [otlp_http/logs]
