@@ -3,11 +3,15 @@ import functools
 import json
 import logging
 import time
-from typing import Type, Union
+from typing import Set, Type, Union
+from uuid import uuid4
 from fastapi import Request, Response, status
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from jwt import DecodeError, ExpiredSignatureError
+from starlette._utils import get_route_path
+from starlette.datastructures import MutableHeaders
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from openai.types import CompletionUsage
 from openai.types.audio.transcription_create_response import (
@@ -33,8 +37,53 @@ from gpustack.server.metrics_collector import (
 )
 from gpustack.api.types.openai_ext import CreateEmbeddingResponseExt, CompletionExt
 
-
 logger = logging.getLogger(__name__)
+inference_access_logger = logging.getLogger("gpustack.inference.access")
+
+GPUSTACK_REQUEST_ID_HEADER = "X-GPUStack-Request-Id"
+
+
+class InferenceAccessMiddleware:
+    """Assign a request ID before authentication and log the response lifecycle."""
+
+    def __init__(self, app: ASGIApp, paths: Set[str]):
+        self.app = app
+        self.paths = paths
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope["method"] != "POST":
+            await self.app(scope, receive, send)
+            return
+        path = get_route_path(scope)
+        if path not in self.paths:
+            await self.app(scope, receive, send)
+            return
+
+        request_id = str(uuid4())
+        headers = MutableHeaders(scope=scope)
+        headers["X-Request-Id"] = request_id
+        del headers[GPUSTACK_REQUEST_ID_HEADER]
+        access = {"request_id": request_id, "method": "POST", "path": path}
+        scope.setdefault("state", {})["inference_access"] = access
+        start = time.monotonic()
+
+        async def send_with_request_id(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                access["response_code"] = message["status"]
+                MutableHeaders(scope=message)[GPUSTACK_REQUEST_ID_HEADER] = request_id
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_request_id)
+        finally:
+            access["duration"] = round((time.monotonic() - start) * 1000)
+            inference_access_logger.info(
+                "POST %s %s request_id=%s",
+                path,
+                access.get("response_code", "-"),
+                request_id,
+                extra=access,
+            )
 
 
 @functools.lru_cache(maxsize=1)

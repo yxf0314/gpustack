@@ -275,6 +275,14 @@ async def proxy_request_by_model(
         lookup_worker_id = (
             rank_endpoint.worker_id if rank_endpoint else instance.worker_id
         )
+        access = getattr(request.state, "inference_access", None)
+        if access is not None:
+            access.update(
+                model_route_id=request.state.model_route_id,
+                model_id=model.id,
+                model_instance_id=instance.id,
+                worker_id=lookup_worker_id,
+            )
         worker: Worker = await WorkerService(session).get_by_id(lookup_worker_id)
         if not worker or getattr(worker, "deleted_at", None) is not None:
             raise InternalServerErrorException(

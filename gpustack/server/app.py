@@ -12,7 +12,8 @@ from gpustack.api.auth import BearerTokenAuthenticator
 from gpustack.config.config import Config
 from gpustack import envs
 from gpustack.routes import ui
-from gpustack.routes.routes import api_router
+from gpustack.routes.routes import api_router, inference_router
+from gpustack.schemas.config import GatewayModeEnum
 from gpustack.utils.forwarded import ForwardedHostPortMiddleware
 from gpustack.security import JWTManager
 from gpustack.gateway.utils import worker_websocket_connect_callback
@@ -69,6 +70,7 @@ def create_app(cfg: Config) -> FastAPI:
     app.add_middleware(middlewares.RequestTimeMiddleware)
     app.add_middleware(middlewares.ModelUsageMiddleware)
     app.add_middleware(middlewares.RefreshTokenMiddleware)
+    native_inference = cfg.gateway_mode == GatewayModeEnum.disabled
     if cfg.enable_cors:
         app.add_middleware(
             CORSMiddleware,
@@ -76,6 +78,18 @@ def create_app(cfg: Config) -> FastAPI:
             allow_credentials=cfg.allow_credentials,
             allow_methods=cfg.allow_methods,
             allow_headers=cfg.allow_headers,
+            expose_headers=(
+                [middlewares.GPUSTACK_REQUEST_ID_HEADER] if native_inference else []
+            ),
+        )
+    if native_inference:
+        app.add_middleware(
+            middlewares.InferenceAccessMiddleware,
+            paths={
+                route.path
+                for route in inference_router.routes
+                if "POST" in route.methods
+            },
         )
     app.include_router(api_router)
     _load_extension_plugins(app, cfg)

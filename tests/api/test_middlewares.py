@@ -7,11 +7,17 @@ usage flush batch.
 """
 
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from gpustack.api import middlewares
+from gpustack.api.auth import get_current_user
 from gpustack.api.exceptions import ForbiddenException, NotFoundException
+from gpustack.schemas.config import GatewayModeEnum
+from gpustack.server.app import create_app
 
 
 class _FakeSessionCtx:
@@ -41,6 +47,69 @@ def _stub_tenant_context(monkeypatch, *, result=None, exc=None):
 
 _REQUEST = SimpleNamespace(state=SimpleNamespace())
 _USER = SimpleNamespace(id=5, is_admin=False)
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "has_request_id"),
+    [
+        ("POST", "/v1/chat/completions", True),
+        ("POST", "/v1-openai/chat/completions", True),
+        ("POST", "/v1/rerank", True),
+        ("GET", "/v1/models", False),
+        ("GET", "/v2/models", False),
+        ("POST", "/v1/not-an-inference-route", False),
+    ],
+)
+def test_native_inference_request_id_on_entry(config, method, path, has_request_id):
+    app = create_app(
+        config.model_copy(update={"gateway_mode": GatewayModeEnum.disabled})
+    )
+
+    async def reject():
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    app.dependency_overrides[get_current_user] = reject
+    response = TestClient(app).request(method, path, headers={"X-Request-Id": "client"})
+
+    request_ids = response.headers.get_list("X-GPUStack-Request-Id")
+    if has_request_id:
+        assert response.status_code == 401
+        assert len(request_ids) == 1
+        assert UUID(request_ids[0]).version == 4
+    else:
+        assert request_ids == []
+
+
+@pytest.mark.parametrize(
+    "gateway_mode", [GatewayModeEnum.disabled, GatewayModeEnum.embedded]
+)
+def test_native_inference_request_id_cors(config, gateway_mode):
+    origin = "https://client.example.com"
+    app = create_app(
+        config.model_copy(
+            update={
+                "gateway_mode": gateway_mode,
+                "enable_cors": True,
+                "allow_origins": [origin],
+            }
+        )
+    )
+
+    async def reject():
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    app.dependency_overrides[get_current_user] = reject
+    response = TestClient(app).post("/v1/chat/completions", headers={"Origin": origin})
+
+    assert response.headers["access-control-allow-origin"] == origin
+    if gateway_mode == GatewayModeEnum.disabled:
+        assert (
+            "x-gpustack-request-id"
+            in response.headers["access-control-expose-headers"].lower()
+        )
+        assert "x-gpustack-request-id" in response.headers
+    else:
+        assert "x-gpustack-request-id" not in response.headers
 
 
 @pytest.mark.asyncio
