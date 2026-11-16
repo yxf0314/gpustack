@@ -378,6 +378,7 @@ class Config(WorkerConfig, BaseSettings):
     log_otlp_endpoint: Optional[str] = Field(default=None, repr=False)
     log_otlp_authorization: Optional[SecretStr] = Field(default=None, repr=False)
     log_otlp_ca_file: Optional[str] = None
+    trace_otlp_endpoint: Optional[str] = None
     builtin_prometheus_port: int = 19090
     prometheus_url: Optional[str] = None
     builtin_grafana_port: int = 13000
@@ -522,6 +523,28 @@ class Config(WorkerConfig, BaseSettings):
         self._derive_auth_cache_key = hmac.new(
             self.jwt_secret_key.encode(), b"gateway-auth-cache", hashlib.sha256
         ).hexdigest()
+
+    @field_validator("trace_otlp_endpoint")
+    @classmethod
+    def _validate_trace_otlp_endpoint(cls, value: Optional[str]) -> Optional[str]:
+        value = (value or "").strip()
+        if not value:
+            return None
+
+        try:
+            endpoint = urlparse(f"//{value}")
+            if (
+                endpoint.netloc == value
+                and endpoint.hostname
+                and endpoint.port
+                and endpoint.username is None
+                and not any(char.isspace() for char in value)
+            ):
+                return value
+        except ValueError:
+            pass
+
+        raise ValueError("trace_otlp_endpoint must be an OTLP/gRPC host:port address")
 
     @field_validator("trusted_proxy_cidrs")
     @classmethod

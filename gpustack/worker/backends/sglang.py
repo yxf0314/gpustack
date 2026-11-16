@@ -291,6 +291,8 @@ class SGLangServer(InferenceServer):
                 is_distributed=deployment_metadata.distributed,
                 is_distributed_leader=deployment_metadata.distributed_leader,
                 entrypoint=command,
+                image=image,
+                env=env,
             )
 
         try:
@@ -573,6 +575,9 @@ class SGLangServer(InferenceServer):
         is_distributed: bool,
         is_distributed_leader: bool,
         entrypoint: Optional[List[str]] = None,
+        *,
+        image: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
     ) -> Tuple[List[str], List[str]]:
         """
         Build SGLang command arguments for container execution.
@@ -583,13 +588,13 @@ class SGLangServer(InferenceServer):
             added by GPUStack, excluding the entrypoint and user-specified
             backend parameters.
         """
-        arguments = [
+        default_arguments = [
             "--model-path",
             self._model_path,
         ]
 
         # Allow version-specific command override if configured (before appending extra args)
-        arguments = self.build_versioned_command_args(arguments)
+        arguments = self.build_versioned_command_args(default_arguments)
 
         specified_max_model_len = find_parameter(
             self._model.backend_parameters,
@@ -685,6 +690,16 @@ class SGLangServer(InferenceServer):
             user_backend_parameters, _ = split_sglang_smg_parameters(
                 user_backend_parameters, self._smg_image_dependencies, tokenized=True
             )
+        if (
+            image
+            and env is not None
+            and entrypoint == ["sglang", "serve"]
+            and arguments is default_arguments
+            and not self._model.run_command
+        ):
+            arguments.extend(
+                self._get_observability_arguments(image, user_backend_parameters, env)
+            )
         arguments.extend(user_backend_parameters)
 
         # Match the served model name to the deployment name used in API requests.
@@ -706,6 +721,59 @@ class SGLangServer(InferenceServer):
         )
 
         return arguments, injected
+
+    def _get_observability_arguments(
+        self, image: str, user_args: List[str], env: Dict[str, str]
+    ) -> List[str]:
+        """Build engine arguments and enable the request ID header in native logs."""
+        config = self._config
+        dependencies = self._resolved_image_dependencies or {}
+        if (
+            not (config.log_otlp_endpoint or config.trace_otlp_endpoint)
+            or dependencies.get("sglang") != "0.5.22"
+            or image.rsplit("/", 1)[-1] != "runner:cuda13.0-sglang0.5.22"
+            or env.get("PYPI_PACKAGES_INSTALL")
+        ):
+            return []
+
+        options = {argument.partition("=")[0] for argument in user_args}
+        if "--config" in options:
+            return []
+
+        arguments: List[str] = []
+        if (
+            config.log_otlp_endpoint
+            and not env.get("SGLANG_LOG_REQUEST_HEADERS")
+            and options.isdisjoint(
+                (
+                    "--log-requests",
+                    "--log-requests-level",
+                    "--log-requests-format",
+                    "--log-requests-target",
+                )
+            )
+        ):
+            # SGLang's native rid is independent of the ID propagated by GPUStack.
+            env.setdefault("SGLANG_LOG_REQUEST_HEADERS", "x-request-id")
+            arguments.extend(
+                [
+                    "--log-requests",
+                    "--log-requests-level",
+                    "0",
+                    "--log-requests-format",
+                    "json",
+                ]
+            )
+        if (
+            config.trace_otlp_endpoint
+            and options.isdisjoint(("--enable-trace", "--otlp-traces-endpoint"))
+            and not env.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+            and env.get("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc") == "grpc"
+        ):
+            arguments.extend(
+                ["--enable-trace", "--otlp-traces-endpoint", config.trace_otlp_endpoint]
+            )
+        return arguments
 
     def _build_command_args_for_diffusion(
         self, port: int, entrypoint: Optional[List[str]] = None
