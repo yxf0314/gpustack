@@ -202,16 +202,12 @@ def test_observability_endpoints_reach_server_and_workers(logs, traces):
     assert ("gpustack-otel-tracing" in names(docs, "EnvoyFilter")) is traces
 
 
-@pytest.mark.parametrize("mode", ["nodeCollector", "existingAgent"])
-def test_higress_logging_modes(mode):
+def test_logging_references_existing_secrets():
     docs = render(
         "--set",
-        f"logging.higress.mode={mode},logging.authorizationSecret.name=logs-auth,logging.caSecret.name=logs-ca",
+        "logging.authorizationSecret.name=logs-auth,logging.caSecret.name=logs-ca",
         "--set-string",
         "logging.endpoint=https://collector:4318/v1/logs",
-    )
-    assert ("gpustack-higress-log-collector" in names(docs, "DaemonSet")) is (
-        mode == "nodeCollector"
     )
     assert "logs-auth" not in names(docs, "Secret")
     server = next(
@@ -237,56 +233,26 @@ def test_higress_logging_modes(mode):
     }
 
 
-def test_higress_node_collector_reads_only_the_bundled_gateways_stdout():
-    name = "gpustack-higress-log-collector"
+def test_legacy_higress_log_collection_values_do_not_mount_host_logs():
     docs = render(
-        "--namespace",
-        "inference",
+        "--is-upgrade",
         "--set",
-        "higress-core.gateway.name=edge,higress-core.gateway.nodeSelector.pool=edge",
-        "--set",
-        "logging.higress.mode=nodeCollector,logging.authorizationSecret.name=logs-secret",
+        "logging.higress.mode=nodeCollector",
         "--set-string",
         "logging.endpoint=https://collector:4318/v1/logs",
     )
-    collector_config = next(
-        doc
-        for doc in docs
-        if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == name
-    )
-    config = yaml.safe_load(collector_config["data"]["collector.yaml"])
-    receiver = config["receivers"]["filelog/higress"]
-    assert receiver["include"] == [
-        "/var/log/pods/inference_edge-*_*/higress-gateway/[0-9]*.log"
-    ]
-    assert receiver["operators"][0] == {"type": "container"}
-    assert set(config["service"]["pipelines"]) == {"logs/higress"}
-    embedded = yaml.safe_load(
-        pathlib.Path("pack/rootfs/etc/gpustack/logging/collector.yaml").read_text()
-    )
-    assert (
-        config["processors"]["transform/higress"]
-        == embedded["processors"]["transform/higress"]
-    )
-    assert (
-        config["exporters"]["otlp_http/logs"]["headers"]["Authorization"]
-        == "${env:GPUSTACK_LOG_OTLP_AUTHORIZATION}"
-    )
-    daemonset = next(
-        doc
-        for doc in docs
-        if doc["kind"] == "DaemonSet" and doc["metadata"]["name"] == name
-    )
-    pod = daemonset["spec"]["template"]["spec"]
-    assert pod["nodeSelector"] == {"kubernetes.io/os": "linux", "pool": "edge"}
-    assert pod["automountServiceAccountToken"] is False
-    container = pod["containers"][0]
-    assert container["securityContext"]["privileged"] is False
-    assert container["securityContext"]["capabilities"] == {"drop": ["ALL"]}
-    mount = next(
-        volume for volume in container["volumeMounts"] if volume["name"] == "pod-logs"
-    )
-    assert mount["readOnly"] is True
+    obsolete = "gpustack-higress-log-collector"
+    assert obsolete not in names(docs, "DaemonSet")
+    assert obsolete not in names(docs, "ConfigMap")
+    for doc in docs:
+        if doc["kind"] in {"Deployment", "DaemonSet", "StatefulSet"}:
+            volumes = doc["spec"]["template"]["spec"].get("volumes", [])
+            assert all(
+                not volume.get("hostPath", {})
+                .get("path", "")
+                .startswith(("/var/log/pods", "/var/log/containers"))
+                for volume in volumes
+            )
 
 
 @pytest.mark.parametrize(
@@ -336,8 +302,6 @@ def test_bundled_higress_tracing_matches_embedded_settings(endpoint):
 def test_existing_gateway_and_worker_only_telemetry():
     endpoint = "collector.monitoring.svc:4317"
     settings = (
-        "--set",
-        "logging.higress.mode=existingAgent",
         "--set-string",
         "logging.endpoint=http://collector:4318/v1/logs",
         "--set-string",
@@ -365,16 +329,6 @@ def test_existing_gateway_and_worker_only_telemetry():
 @pytest.mark.parametrize(
     "settings,message",
     [
-        ("logging.higress.mode=unknown", "logging.higress.mode must be"),
-        ("logging.higress.mode=nodeCollector", "requires logging.endpoint"),
-        (
-            "logging.higress.mode=nodeCollector,logging.endpoint=http://logs/v1/logs,higress-core.enabled=false",
-            "requires logging.endpoint",
-        ),
-        (
-            "logging.higress.mode=nodeCollector,logging.endpoint=http://logs/v1/logs,higress-core.global.o11y.enabled=true",
-            "requires Higress access logs on stdout",
-        ),
         (
             "logging.endpoint=http://logs/v1/logs,logging.authorizationSecret.name=logs-auth",
             "require an HTTPS",

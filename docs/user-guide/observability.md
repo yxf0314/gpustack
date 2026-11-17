@@ -1,6 +1,6 @@
 # Observability
 
-This document describes how to monitor GPUStack Server/Worker/LLM serving runtime metrics using Prometheus and Grafana.
+Monitor GPUStack metrics with Prometheus and Grafana, and use inference logs and traces to investigate individual requests.
 
 ## Overview
 
@@ -102,6 +102,78 @@ If you already have an external Prometheus/Grafana stack, you can configure it m
   Access Prometheus at `http://<host>:19090` by default, or the port configured by `--builtin-prometheus-port` / `GPUSTACK_BUILTIN_PROMETHEUS_PORT`.
 - **Grafana UI**:  
   Access Grafana at `http://<host>:13000` by default, or the port configured by `--builtin-grafana-port` / `GPUSTACK_BUILTIN_GRAFANA_PORT`. Built-in Grafana is configured for anonymous Viewer access with the login form disabled. The admin credentials remain `admin` / `grafana` by default.
+
+## Inference Logs and Traces
+
+Inference responses include an `X-GPUStack-Request-Id` header. Use that ID to look up request logs and traces in your telemetry backend. Log export and tracing have independent settings. Set either endpoint to an empty value to disable that signal.
+
+| Log endpoint | Trace endpoint | Available telemetry |
+| --- | --- | --- |
+| Empty | Empty | Local text logs |
+| Set | Empty | Exported logs and local application logs in JSON |
+| Empty | Set | Exported traces and local text logs |
+| Set | Set | Exported logs and traces that can be correlated by trace ID |
+
+Use OTLP endpoints provided by your telemetry infrastructure. The log endpoint must be reachable from the GPUStack containers that export logs. The trace endpoint must be reachable from the Server, Workers, gateways, and inference containers that export traces. The tracing connection uses plaintext gRPC, so use an address on a trusted network.
+
+### Configure Docker
+
+Set these variables on the Server and each separate Worker container. Replace `<collector-host>` with a name or address reachable from those containers.
+
+```bash
+GPUSTACK_LOG_OTLP_ENDPOINT='http://<collector-host>:4318/v1/logs'
+GPUSTACK_TRACE_OTLP_ENDPOINT='<collector-host>:4317'
+```
+
+Pass them with `docker run -e` or under `environment` in your Compose file. The log endpoint is the full OTLP/HTTP URL. The trace endpoint is an OTLP/gRPC `host:port` without a URL scheme.
+
+For an HTTPS log endpoint, set `GPUSTACK_LOG_OTLP_AUTHORIZATION` to the full authorization header value when the receiver requires it. If the endpoint uses a private CA, mount the certificate read-only and set `GPUSTACK_LOG_OTLP_CA_FILE` to its path inside the container.
+
+### Configure Helm
+
+Add the desired endpoints to the values of each GPUStack release.
+
+```yaml
+logging:
+  endpoint: "http://<collector-host>:4318/v1/logs"
+tracing:
+  endpoint: "<collector-host>:4317"
+```
+
+Use a namespace-qualified Service DNS name for a Collector in another namespace. With an HTTPS log endpoint, `logging.authorizationSecret` and `logging.caSecret` take a `name` and a `key` from existing Secrets in the release namespace. Their default keys are `authorization` and `ca.crt`.
+
+On Kubernetes, use your existing logging agent to collect Higress access logs from the gateway's stdout. The bundled gateway's default access log format includes `request_id` and includes `traceparent` when tracing is enabled. If you manage Higress separately, configure tracing in that gateway and propagate W3C `traceparent` to the inference backends.
+
+!!! note
+
+    Recreate Docker containers or apply the updated Helm release after changing the endpoints. Restart or redeploy already-running model instances so their engine and PD Router launch settings can take effect.
+
+### Look Up a Request
+
+1. Send a request to a running chat model and keep the response headers. Replace `<gpustack-host>`, `<api-key>`, and `<model-name>` with your deployment values. See [API Key Management](api-key-management.md) for inference permissions.
+
+   ```bash
+   curl --silent --show-error --no-buffer \
+     --dump-header response-headers.txt \
+     'http://<gpustack-host>/v1/chat/completions' \
+     --header 'Authorization: Bearer <api-key>' \
+     --header 'Content-Type: application/json' \
+     --data '{"model":"<model-name>","messages":[{"role":"user","content":"Reply with one word."}],"max_tokens":8,"stream":true}'
+
+   grep -i '^X-GPUStack-Request-Id:' response-headers.txt
+   ```
+
+2. In your log backend, set the time range around the request and filter on the `request_id` log attribute. Use the OTLP resource attribute `service.name` to select a source such as `higress`, `gpustack.server`, or `gpustack.engine`. Where present, `worker_id`, `model_instance_id`, and `role` can narrow the results.
+3. If a log record carries an OTLP trace ID, use that ID to retrieve the trace from your trace backend. With tracing enabled, you can also search for the platform request ID using the `gpustack.request_id` span attribute, including when log export is off.
+
+### Investigate PD Requests
+
+- **SGLang Mooncake.** Use `request_id` to find the entry, Router, and both engine logs. Use `pd_attempt_id` on the engine records to distinguish dispatch attempts. The supported Router passes the trace context through so Prefill and Decode appear on the same trace as the entry point. Use the Router logs for its dispatch and retry details.
+- **vLLM NIXL.** On success, find `pd_coordinator_id` on the entry log, then search for the same value across the engine and available Router logs.
+
+  When the entry log lacks a coordinator ID after a failure, first find the entry by request ID. Narrow the Prefill candidates by request time and model or instance. Copy `pd_coordinator_id` from a confirmed record and run the second search. Concurrent requests can overlap, so use deployment and dispatch evidence to confirm the match.
+
+The initial PD telemetry configurations use the NVIDIA Runner images for vLLM 0.32.0 with `vllm-router` 0.1.16, and SGLang 0.5.22 with `sglang-router` 0.3.2. vLLM Router spans describe ingress and HTTP dispatch. Use the engine spans for engine timing. SGLang Router spans are deferred until upstream can inherit the incoming trace context.
 
 ## Migration from Older Compose Setups
 

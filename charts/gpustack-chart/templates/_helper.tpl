@@ -369,7 +369,7 @@ imagePullSecrets:
 {{- end }}
 {{- end -}}
 
-{{- define "gpustack.loggingEnv" -}}
+{{- define "gpustack.observabilityEnv" -}}
 {{- with .Values.logging.endpoint }}
 - name: GPUSTACK_LOG_OTLP_ENDPOINT
   value: {{ . | quote }}
@@ -385,10 +385,6 @@ imagePullSecrets:
   value: /etc/gpustack/otel-ca/ca.crt
 {{- end }}
 {{- end }}
-{{- end }}
-
-{{- define "gpustack.observabilityEnv" -}}
-{{- include "gpustack.loggingEnv" . }}
 {{- with .Values.tracing.endpoint }}
 - name: GPUSTACK_TRACE_OTLP_ENDPOINT
   value: {{ . | quote }}

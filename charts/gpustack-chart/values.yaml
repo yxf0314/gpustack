@@ -97,11 +97,6 @@ logging:
   caSecret:
     name: ""
     key: ca.crt
-  higress:
-    # disabled, nodeCollector, or existingAgent. The nodeCollector reads
-    # only the bundled gateway's Kubernetes container logs. For a gateway
-    # already collected by your infrastructure, use existingAgent.
-    mode: disabled
 tracing:
   # OTLP/gRPC host:port reachable from every participating pod. A Service in
   # another namespace should use its namespace-qualified DNS name.

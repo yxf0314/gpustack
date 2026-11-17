@@ -42,20 +42,6 @@ supplying a username and password asks for.
 {{- fail "imagePullSecret.credentials are set but imagePullSecret.create is false: the credentials would be discarded. Drop them, or set create=true to have this release own the Secret." }}
 {{- end }}
 
-{{- $logMode := .Values.logging.higress.mode }}
-{{- if not (has $logMode (list "disabled" "nodeCollector" "existingAgent")) }}
-{{- fail "logging.higress.mode must be disabled, nodeCollector, or existingAgent." }}
-{{- end }}
-{{- if eq $logMode "nodeCollector" }}
-{{- $higress := index .Values "higress-core" }}
-{{- if not (and .Values.logging.endpoint .Values.server.enabled $higress.enabled) }}
-{{- fail "logging.higress.mode=nodeCollector requires logging.endpoint and the bundled Higress with a server." }}
-{{- end }}
-{{- $mesh := $higress.meshConfig | default dict }}
-{{- if or (and $mesh.accessLogFile (ne $mesh.accessLogFile "/dev/stdout")) ($higress.global.o11y.enabled) }}
-{{- fail "logging.higress.mode=nodeCollector requires Higress access logs on stdout. Use existingAgent for an existing gateway collector." }}
-{{- end }}
-{{- end }}
 {{- with .Values.logging.endpoint }}
 {{- if not (regexMatch "^https?://[^/@?#[:space:]]+/[^?#[:space:]]*$" .) }}
 {{- fail "logging.endpoint must be a full OTLP/HTTP logs URL without credentials, query, or fragment." }}
