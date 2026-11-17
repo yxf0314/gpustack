@@ -208,11 +208,15 @@ def test_engine_observability_switches(tmp_path, engine, logs, traces):
 
 @pytest.mark.parametrize("engine", _ENGINE_SETUP)
 @pytest.mark.parametrize("role", ["prefill", "decode"])
-def test_engine_observability_with_pd_recipe(tmp_path, engine, role):
-    launch, _ = _capture_observable_engine_launch(tmp_path, engine, role=role)
+@pytest.mark.parametrize("logs", [False, True])
+def test_engine_observability_with_pd_recipe(tmp_path, engine, role, logs):
+    launch, _ = _capture_observable_engine_launch(
+        tmp_path, engine, role=role, logs=logs
+    )
     arguments = launch["command_args"]
-    assert arguments.count(_NATIVE_LOG_FLAGS[engine][0]) == 1
+    assert arguments.count(_NATIVE_LOG_FLAGS[engine][0]) == int(logs)
     assert arguments.count("--otlp-traces-endpoint") == 1
+    assert arguments[arguments.index("--otlp-traces-endpoint") + 1] == _TRACE_COLLECTOR
     if engine == "vllm":
         value = arguments[arguments.index("--kv-transfer-config") + 1]
         assert json.loads(value)["kv_role"] == (
@@ -220,6 +224,7 @@ def test_engine_observability_with_pd_recipe(tmp_path, engine, role):
         )
     else:
         assert arguments[arguments.index("--disaggregation-mode") + 1] == role
+        assert arguments.count("--enable-trace") == 1
 
 
 @pytest.mark.parametrize(

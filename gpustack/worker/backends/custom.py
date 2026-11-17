@@ -50,6 +50,39 @@ echo "PD router nofile limits: soft=$(ulimit -Sn), hard=$(ulimit -Hn)" >&2
 exec "$@"
 """
 
+# The bundled vLLM Router exposes tracing in its Python binding but not its CLI.
+_VLLM_ROUTER_TRACE_SCRIPT = """\
+import sys
+from vllm_router.launch_router import launch_router, parse_router_args
+
+args = parse_router_args(sys.argv[2:])
+args.enable_trace = True
+args.otlp_traces_endpoint = sys.argv[1]
+launch_router(args)
+"""
+
+
+def _vllm_router_trace_command(
+    image: str,
+    args: List[str],
+    env: Dict[str, str],
+    endpoint: Optional[str],
+) -> List[str]:
+    if (
+        not endpoint
+        or image.rsplit("/", 1)[-1] != "runner:cuda13.0-vllm0.32.0"
+        or args[:1] != ["vllm-router"]
+        or env.get("PYPI_PACKAGES_INSTALL")
+        or env.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        or env.get("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc") != "grpc"
+    ):
+        return args
+
+    options = {arg.partition("=")[0] for arg in args[1:]}
+    if options & {"--enable-trace", "--otlp-traces-endpoint"}:
+        return args
+    return ["python3", "-c", _VLLM_ROUTER_TRACE_SCRIPT, endpoint, *args[1:]]
+
 
 class CustomServer(InferenceServer):
     """
@@ -173,6 +206,17 @@ class CustomServer(InferenceServer):
                 self._model.backend_version
             )
             image_overridden = image_overridden or bool(configured_image)
+        if (
+            managed_router
+            and launch
+            and launch.source == "recipe"
+            and not image_overridden
+            and not command
+            and source_model.disaggregation.mode.value == "vllm-nixl"
+        ):
+            command_args = _vllm_router_trace_command(
+                image, command_args, env, self._config.trace_otlp_endpoint
+            )
         if managed_router and not backend_command and image_overridden and not command:
             if not command_args:
                 raise ValueError("Managed PD router requires an explicit command")
