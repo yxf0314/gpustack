@@ -86,6 +86,26 @@ image:
   repository: gpustack/gpustack
   tag: null
   pullPolicy: IfNotPresent
+logging:
+  # Full OTLP/HTTP logs URL, including /v1/logs. Empty disables export.
+  endpoint: ""
+  # Optional existing Secret in this release's namespace. The value is the
+  # complete Authorization header. Credentials and custom CAs require HTTPS.
+  authorizationSecret:
+    name: ""
+    key: authorization
+  caSecret:
+    name: ""
+    key: ca.crt
+  higress:
+    # disabled, nodeCollector, or existingAgent. The nodeCollector reads
+    # only the bundled gateway's Kubernetes container logs. For a gateway
+    # already collected by your infrastructure, use existingAgent.
+    mode: disabled
+tracing:
+  # OTLP/gRPC host:port reachable from every participating pod. A Service in
+  # another namespace should use its namespace-qualified DNS name.
+  endpoint: ""
 server:
   # Deploy the GPUStack server (control plane) from this release.
   #

@@ -41,3 +41,35 @@ supplying a username and password asks for.
 {{- if and (not $pullSecret.create) $credentials.username $credentials.password }}
 {{- fail "imagePullSecret.credentials are set but imagePullSecret.create is false: the credentials would be discarded. Drop them, or set create=true to have this release own the Secret." }}
 {{- end }}
+
+{{- $logMode := .Values.logging.higress.mode }}
+{{- if not (has $logMode (list "disabled" "nodeCollector" "existingAgent")) }}
+{{- fail "logging.higress.mode must be disabled, nodeCollector, or existingAgent." }}
+{{- end }}
+{{- if eq $logMode "nodeCollector" }}
+{{- $higress := index .Values "higress-core" }}
+{{- if not (and .Values.logging.endpoint .Values.server.enabled $higress.enabled) }}
+{{- fail "logging.higress.mode=nodeCollector requires logging.endpoint and the bundled Higress with a server." }}
+{{- end }}
+{{- $mesh := $higress.meshConfig | default dict }}
+{{- if or (and $mesh.accessLogFile (ne $mesh.accessLogFile "/dev/stdout")) ($higress.global.o11y.enabled) }}
+{{- fail "logging.higress.mode=nodeCollector requires Higress access logs on stdout. Use existingAgent for an existing gateway collector." }}
+{{- end }}
+{{- end }}
+{{- with .Values.logging.endpoint }}
+{{- if not (regexMatch "^https?://[^/@?#[:space:]]+/[^?#[:space:]]*$" .) }}
+{{- fail "logging.endpoint must be a full OTLP/HTTP logs URL without credentials, query, or fragment." }}
+{{- end }}
+{{- if and (or $.Values.logging.authorizationSecret.name $.Values.logging.caSecret.name) (not (hasPrefix "https://" .)) }}
+{{- fail "logging.authorizationSecret and logging.caSecret require an HTTPS logging.endpoint." }}
+{{- end }}
+{{- end }}
+{{- with .Values.tracing.endpoint }}
+{{- $port := last (splitList ":" .) | atoi }}
+{{- if or (not (regexMatch "^(\\[[0-9a-fA-F:.]+\\]|[a-zA-Z0-9_.-]+):[0-9]{1,5}$" .)) (lt $port 1) (gt $port 65535) }}
+{{- fail "tracing.endpoint must be an OTLP/gRPC host:port address." }}
+{{- end }}
+{{- if and $.Values.server.enabled (index $.Values "higress-core" "enabled") (not (index $.Values "higress-core" "global" "enableIstioAPI")) }}
+{{- fail "tracing.endpoint requires higress-core.global.enableIstioAPI for the bundled gateway." }}
+{{- end }}
+{{- end }}

@@ -1,5 +1,6 @@
 from copy import deepcopy
 from enum import Enum
+from pathlib import Path
 from urllib.parse import urlsplit
 from kubernetes_asyncio import client
 from kubernetes_asyncio.client import V1ObjectMeta
@@ -14,6 +15,8 @@ from gpustack.utils.network import is_ipaddress
 GROUP = "networking.istio.io"
 VERSION = "v1alpha3"
 PLURAL = "envoyfilters"
+HIGRESS_DEFAULT_CONFIG = Path("/etc/gpustack/data/defaultConfig")
+HIGRESS_CONFIGMAP = "configmaps/higress-config.yaml"
 
 _HCM = "envoy.filters.network.http_connection_manager"
 _ROUTER = "envoy.filters.http.router"
@@ -348,6 +351,29 @@ def get_ingress_fallback_envoyfilter(
         ),
     )
     return envoyfilter
+
+
+def configure_higress_access_log_context(
+    mesh: dict, defaults: dict, enabled: bool
+) -> bool:
+    """Switch the bundled access-log format while preserving user formats."""
+    default_format = defaults["accessLogFormat"]
+    trace_format = default_format.replace(
+        '"trace_id":"%REQ(X-B3-TRACEID)%"',
+        '"traceparent":"%REQ(TRACEPARENT):55%"',
+    )
+    original = (defaults["accessLogEncoding"], default_format.strip())
+    traced = ("JSON", trace_format.strip())
+    if not isinstance(mesh, dict) or not isinstance(mesh.get("accessLogFormat"), str):
+        return False
+    current = (mesh.get("accessLogEncoding"), mesh["accessLogFormat"].strip())
+    if enabled and current == original:
+        mesh.update(accessLogEncoding="JSON", accessLogFormat=trace_format)
+        return True
+    if not enabled and current == traced:
+        mesh.update(accessLogEncoding=original[0], accessLogFormat=default_format)
+        return True
+    return False
 
 
 def get_ingress_tracing_envoyfilter(

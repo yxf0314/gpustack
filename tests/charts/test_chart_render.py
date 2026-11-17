@@ -21,6 +21,9 @@ import pytest
 import yaml
 
 from gpustack import __operator_version__
+from gpustack.gateway.client.networking_istio_io_v1alpha3_api import (
+    get_ingress_tracing_envoyfilter,
+)
 
 HELM = shutil.which("helm")
 SAFE_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
@@ -168,6 +171,225 @@ def container_env(docs: list[dict], kind: str, name: str) -> dict[str, str]:
                 if "value" in e
             }
     pytest.fail(f"{kind}/{name} not rendered")
+
+
+@pytest.mark.parametrize(
+    "logs,traces", [(False, False), (True, False), (False, True), (True, True)]
+)
+def test_observability_endpoints_reach_server_and_workers(logs, traces):
+    log_endpoint = "https://logs.test:4318/v1/logs"
+    trace_endpoint = "collector.monitoring.svc:4317"
+    docs = render(
+        "--set",
+        "worker.enabled=true,worker.gpuVendors={nvidia,amd}",
+        "--set-string",
+        f"logging.endpoint={log_endpoint if logs else ''}",
+        "--set-string",
+        f"tracing.endpoint={trace_endpoint if traces else ''}",
+    )
+    for kind, name in (
+        ("StatefulSet", "gpustack-server"),
+        ("DaemonSet", "gpustack-worker"),
+        ("DaemonSet", "gpustack-worker-nvidia"),
+        ("DaemonSet", "gpustack-worker-amd"),
+    ):
+        env = container_env(docs, kind, name)
+        assert env.get("GPUSTACK_LOG_OTLP_ENDPOINT") == (log_endpoint if logs else None)
+        assert env.get("GPUSTACK_TRACE_OTLP_ENDPOINT") == (
+            trace_endpoint if traces else None
+        )
+    assert "gpustack-higress-log-collector" not in names(docs, "DaemonSet")
+    assert ("gpustack-otel-tracing" in names(docs, "EnvoyFilter")) is traces
+
+
+@pytest.mark.parametrize("mode", ["nodeCollector", "existingAgent"])
+def test_higress_logging_modes(mode):
+    docs = render(
+        "--set",
+        f"logging.higress.mode={mode},logging.authorizationSecret.name=logs-auth,logging.caSecret.name=logs-ca",
+        "--set-string",
+        "logging.endpoint=https://collector:4318/v1/logs",
+    )
+    assert ("gpustack-higress-log-collector" in names(docs, "DaemonSet")) is (
+        mode == "nodeCollector"
+    )
+    assert "logs-auth" not in names(docs, "Secret")
+    server = next(
+        doc
+        for doc in docs
+        if doc["kind"] == "StatefulSet" and doc["metadata"]["name"] == "gpustack-server"
+    )
+    server_container = server["spec"]["template"]["spec"]["containers"][0]
+    env = {entry["name"]: entry for entry in server_container["env"]}
+    assert env["GPUSTACK_LOG_OTLP_AUTHORIZATION"]["valueFrom"]["secretKeyRef"] == {
+        "name": "logs-auth",
+        "key": "authorization",
+    }
+    pod = server["spec"]["template"]["spec"]
+    ca = next(
+        volume["secret"]
+        for volume in pod["volumes"]
+        if volume["name"] == "gpustack-otel-ca"
+    )
+    assert ca == {
+        "secretName": "logs-ca",
+        "items": [{"key": "ca.crt", "path": "ca.crt"}],
+    }
+
+
+def test_higress_node_collector_reads_only_the_bundled_gateways_stdout():
+    name = "gpustack-higress-log-collector"
+    docs = render(
+        "--namespace",
+        "inference",
+        "--set",
+        "higress-core.gateway.name=edge,higress-core.gateway.nodeSelector.pool=edge",
+        "--set",
+        "logging.higress.mode=nodeCollector,logging.authorizationSecret.name=logs-secret",
+        "--set-string",
+        "logging.endpoint=https://collector:4318/v1/logs",
+    )
+    collector_config = next(
+        doc
+        for doc in docs
+        if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == name
+    )
+    config = yaml.safe_load(collector_config["data"]["collector.yaml"])
+    receiver = config["receivers"]["filelog/higress"]
+    assert receiver["include"] == [
+        "/var/log/pods/inference_edge-*_*/higress-gateway/[0-9]*.log"
+    ]
+    assert receiver["operators"][0] == {"type": "container"}
+    assert set(config["service"]["pipelines"]) == {"logs/higress"}
+    embedded = yaml.safe_load(
+        pathlib.Path("pack/rootfs/etc/gpustack/logging/collector.yaml").read_text()
+    )
+    assert (
+        config["processors"]["transform/higress"]
+        == embedded["processors"]["transform/higress"]
+    )
+    assert (
+        config["exporters"]["otlp_http/logs"]["headers"]["Authorization"]
+        == "${env:GPUSTACK_LOG_OTLP_AUTHORIZATION}"
+    )
+    daemonset = next(
+        doc
+        for doc in docs
+        if doc["kind"] == "DaemonSet" and doc["metadata"]["name"] == name
+    )
+    pod = daemonset["spec"]["template"]["spec"]
+    assert pod["nodeSelector"] == {"kubernetes.io/os": "linux", "pool": "edge"}
+    assert pod["automountServiceAccountToken"] is False
+    container = pod["containers"][0]
+    assert container["securityContext"]["privileged"] is False
+    assert container["securityContext"]["capabilities"] == {"drop": ["ALL"]}
+    mount = next(
+        volume for volume in container["volumeMounts"] if volume["name"] == "pod-logs"
+    )
+    assert mount["readOnly"] is True
+
+
+@pytest.mark.parametrize(
+    "endpoint", ["collector.monitoring.svc:4317", "10.32.1.2:4317", "[fd00::7]:4317"]
+)
+def test_bundled_higress_tracing_matches_embedded_settings(endpoint):
+    docs = render(
+        "--namespace",
+        "inference",
+        "--set",
+        "higress-core.gateway.name=edge",
+        "--set-string",
+        f"tracing.endpoint={endpoint}",
+    )
+    expected = get_ingress_tracing_envoyfilter(
+        "gpustack-otel-tracing", "inference", endpoint
+    )
+    tracing = next(
+        doc
+        for doc in docs
+        if doc["kind"] == "EnvoyFilter"
+        and doc["metadata"]["name"] == "gpustack-otel-tracing"
+    )
+    assert (
+        tracing["spec"]["configPatches"]
+        == expected.model_dump(by_alias=True, mode="json", exclude_none=True)["spec"][
+            "configPatches"
+        ]
+    )
+    gateway = next(
+        doc
+        for doc in docs
+        if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "edge"
+    )
+    assert (
+        tracing["spec"]["workloadSelector"]["labels"]
+        == gateway["spec"]["selector"]["matchLabels"]
+    )
+    assert (
+        container_env(docs, "StatefulSet", "gpustack-server")[
+            "GPUSTACK_HELM_BUNDLED_HIGRESS"
+        ]
+        == "true"
+    )
+
+
+def test_existing_gateway_and_worker_only_telemetry():
+    endpoint = "collector.monitoring.svc:4317"
+    settings = (
+        "--set",
+        "logging.higress.mode=existingAgent",
+        "--set-string",
+        "logging.endpoint=http://collector:4318/v1/logs",
+        "--set-string",
+        f"tracing.endpoint={endpoint}",
+    )
+    docs = render(
+        "--set", "higress-core.enabled=false,gateway.namespace=gateway", *settings
+    )
+    server = container_env(docs, "StatefulSet", "gpustack-server")
+    assert server["GPUSTACK_TRACE_OTLP_ENDPOINT"] == endpoint
+    assert server["GPUSTACK_GATEWAY_NAMESPACE"] == "gateway"
+    assert "GPUSTACK_HELM_BUNDLED_HIGRESS" not in server
+    assert "gpustack-otel-tracing" not in names(docs, "EnvoyFilter")
+    docs = render(*WORKER_ONLY, *SERVER_AND_TOKEN, *settings)
+    assert (
+        container_env(docs, "DaemonSet", "gpustack-worker")[
+            "GPUSTACK_TRACE_OTLP_ENDPOINT"
+        ]
+        == endpoint
+    )
+    assert "gpustack-otel-tracing" not in names(docs, "EnvoyFilter")
+    assert "gpustack-higress-log-collector" not in names(docs, "DaemonSet")
+
+
+@pytest.mark.parametrize(
+    "settings,message",
+    [
+        ("logging.higress.mode=unknown", "logging.higress.mode must be"),
+        ("logging.higress.mode=nodeCollector", "requires logging.endpoint"),
+        (
+            "logging.higress.mode=nodeCollector,logging.endpoint=http://logs/v1/logs,higress-core.enabled=false",
+            "requires logging.endpoint",
+        ),
+        (
+            "logging.higress.mode=nodeCollector,logging.endpoint=http://logs/v1/logs,higress-core.global.o11y.enabled=true",
+            "requires Higress access logs on stdout",
+        ),
+        (
+            "logging.endpoint=http://logs/v1/logs,logging.authorizationSecret.name=logs-auth",
+            "require an HTTPS",
+        ),
+        ("logging.endpoint=https://user:password@logs/v1/logs", "without credentials"),
+        ("tracing.endpoint=https://collector:4317", "OTLP/gRPC host:port"),
+        ("tracing.endpoint=collector:65536", "OTLP/gRPC host:port"),
+        (
+            "tracing.endpoint=collector:4317,higress-core.global.enableIstioAPI=false",
+            "global.enableIstioAPI",
+        ),
+    ],
+)
+def test_invalid_telemetry_settings_are_rejected(settings, message):
+    assert message in render_error("--set", settings)
 
 
 class TestServerOnly:

@@ -15,6 +15,9 @@ from gpustack.schemas.config import GatewayModeEnum
 from gpustack.envs import MIGRATION_DATA_DIR, DATA_MIGRATION
 from gpustack.logging import setup_logging
 from gpustack.gateway.client.networking_istio_io_v1alpha3_api import (
+    HIGRESS_CONFIGMAP,
+    HIGRESS_DEFAULT_CONFIG,
+    configure_higress_access_log_context,
     get_ingress_tracing_envoyfilter,
 )
 from gpustack.cmd.start import (
@@ -41,8 +44,6 @@ from gpustack.worker.log_export import ENGINE_LOG_EXPORT_DIR
 
 logger = logging.getLogger(__name__)
 APPLICATION_LOG_COLLECTOR_TEMPLATE = Path("/etc/gpustack/logging/collector.yaml")
-HIGRESS_DEFAULT_CONFIG = Path("/etc/gpustack/data/defaultConfig")
-_HIGRESS_CONFIGMAP = "configmaps/higress-config.yaml"
 _HIGRESS_TRACING_FILTER = "gpustack-otel-tracing"
 
 
@@ -307,32 +308,13 @@ def _set_higress_access_log_context(
     configmap_path: Path, template: dict, enabled: bool
 ) -> None:
     defaults = yaml.safe_load(template["data"]["mesh"])
-    original_format = defaults["accessLogFormat"]
-    trace_format = original_format.replace(
-        '"trace_id":"%REQ(X-B3-TRACEID)%"',
-        '"traceparent":"%REQ(TRACEPARENT):55%"',
-    )
-    original = (defaults["accessLogEncoding"], original_format.strip())
-    traced = ("JSON", trace_format.strip())
-
     configmap = (
         yaml.safe_load(configmap_path.read_text())
         if configmap_path.exists()
         else template
     )
     mesh = yaml.safe_load(configmap["data"]["mesh"])
-    current = (
-        mesh.get("accessLogEncoding"),
-        (mesh.get("accessLogFormat") or "").strip(),
-    )
-
-    # Switch the managed format only. Other MeshConfig fields and operator
-    # access-log formats belong to the persistent Higress configuration.
-    if enabled and current == original:
-        mesh.update(accessLogEncoding="JSON", accessLogFormat=trace_format)
-    elif not enabled and current == traced:
-        mesh.update(accessLogEncoding=original[0], accessLogFormat=original_format)
-    else:
+    if not configure_higress_access_log_context(mesh, defaults, enabled):
         return
 
     configmap["data"]["mesh"] = yaml.safe_dump(mesh, sort_keys=False)
@@ -341,14 +323,14 @@ def _set_higress_access_log_context(
 
 def _prepare_higress_tracing(apiserver_dir: Path, endpoint: Optional[str]) -> None:
     """Configure the embedded gateway before the file-backed API server starts."""
-    configmap_path = apiserver_dir / _HIGRESS_CONFIGMAP
+    configmap_path = apiserver_dir / HIGRESS_CONFIGMAP
     filter_path = apiserver_dir / "envoyfilters" / f"{_HIGRESS_TRACING_FILTER}.yaml"
     if not endpoint:
         filter_path.unlink(missing_ok=True)
         if not configmap_path.exists():
             return
 
-    template = yaml.safe_load((HIGRESS_DEFAULT_CONFIG / _HIGRESS_CONFIGMAP).read_text())
+    template = yaml.safe_load((HIGRESS_DEFAULT_CONFIG / HIGRESS_CONFIGMAP).read_text())
     if endpoint:
         resource = get_ingress_tracing_envoyfilter(
             _HIGRESS_TRACING_FILTER, template["metadata"]["namespace"], endpoint

@@ -141,6 +141,9 @@ spec:
             - name: NVIDIA_MIG_MONITOR_DEVICES
               value: "all"
             {{- end }}
+            {{- with (include "gpustack.observabilityEnv" $ | trim) }}
+            {{- . | nindent 12 }}
+            {{- end }}
           envFrom:
             - secretRef:
                 name: {{ include "gpustack.registrationTokenSecretName" $ }}
@@ -218,6 +221,9 @@ spec:
             - name: gpustack-thead-toolkit
               mountPath: /usr/local/PPU_SDK
               readOnly: true
+            {{- end }}
+            {{- with (include "gpustack.loggingCaMount" $ | trim) }}
+            {{- . | nindent 12 }}
             {{- end }}
             {{- with $.Values.worker.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
@@ -327,6 +333,9 @@ spec:
           hostPath:
             path: /usr/local/PPU_SDK
             type: DirectoryOrCreate
+        {{- end }}
+        {{- with (include "gpustack.loggingCaVolume" $ | trim) }}
+        {{- . | nindent 8 }}
         {{- end }}
         {{- with $.Values.worker.extraVolumes }}
         {{- toYaml . | nindent 8 }}

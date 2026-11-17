@@ -60,6 +60,8 @@ spec:
             {{- if index .Values "higress-core" "enabled" }}
             - name: GPUSTACK_GATEWAY_NAMESPACE
               value: "{{ .Release.Namespace }}"
+            - name: GPUSTACK_HELM_BUNDLED_HIGRESS
+              value: "true"
             {{- else if .Values.gateway.namespace }}
             - name: GPUSTACK_GATEWAY_NAMESPACE
               value: "{{ .Values.gateway.namespace }}"
@@ -85,6 +87,9 @@ spec:
                 secretKeyRef:
                   name: {{ .Release.Name }}-server-bootstrap-password
                   key: password
+            {{- end }}
+            {{- with (include "gpustack.observabilityEnv" . | trim) }}
+            {{- . | nindent 12 }}
             {{- end }}
           envFrom:
             {{- if .Values.worker.enabled }}
@@ -140,6 +145,9 @@ spec:
               subPath: password
               readOnly: true
             {{- end }}
+            {{- with (include "gpustack.loggingCaMount" . | trim) }}
+            {{- . | nindent 12 }}
+            {{- end }}
             {{- with .Values.server.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -167,7 +175,7 @@ spec:
                   app: {{ .Release.Name }}-server
       {{- end }}
       {{- end }}
-      {{- if or $bootstrapFile .Values.server.dataVolume.hostPath .Values.server.extraVolumes }}
+      {{- if or $bootstrapFile .Values.server.dataVolume.hostPath .Values.server.extraVolumes (include "gpustack.loggingCaVolume" . | trim) }}
       volumes:
         {{- if $bootstrapFile }}
         - name: bootstrap-password
@@ -183,6 +191,9 @@ spec:
           hostPath:
             path: {{ .Values.server.dataVolume.hostPath }}
             type: DirectoryOrCreate
+        {{- end }}
+        {{- with (include "gpustack.loggingCaVolume" . | trim) }}
+        {{- . | nindent 8 }}
         {{- end }}
         {{- with .Values.server.extraVolumes }}
         {{- toYaml . | nindent 8 }}

@@ -368,3 +368,50 @@ imagePullSecrets:
 {{- toYaml . | nindent 2 }}
 {{- end }}
 {{- end -}}
+
+{{- define "gpustack.loggingEnv" -}}
+{{- with .Values.logging.endpoint }}
+- name: GPUSTACK_LOG_OTLP_ENDPOINT
+  value: {{ . | quote }}
+{{- with $.Values.logging.authorizationSecret.name }}
+- name: GPUSTACK_LOG_OTLP_AUTHORIZATION
+  valueFrom:
+    secretKeyRef:
+      name: {{ . | quote }}
+      key: {{ $.Values.logging.authorizationSecret.key | quote }}
+{{- end }}
+{{- if $.Values.logging.caSecret.name }}
+- name: GPUSTACK_LOG_OTLP_CA_FILE
+  value: /etc/gpustack/otel-ca/ca.crt
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{- define "gpustack.observabilityEnv" -}}
+{{- include "gpustack.loggingEnv" . }}
+{{- with .Values.tracing.endpoint }}
+- name: GPUSTACK_TRACE_OTLP_ENDPOINT
+  value: {{ . | quote }}
+{{- end }}
+{{- end }}
+
+{{- define "gpustack.loggingCaMount" -}}
+{{- if and .Values.logging.endpoint .Values.logging.caSecret.name }}
+- name: gpustack-otel-ca
+  mountPath: /etc/gpustack/otel-ca
+  readOnly: true
+{{- end }}
+{{- end }}
+
+{{- define "gpustack.loggingCaVolume" -}}
+{{- with .Values.logging.caSecret }}
+{{- if and $.Values.logging.endpoint .name }}
+- name: gpustack-otel-ca
+  secret:
+    secretName: {{ .name | quote }}
+    items:
+      - key: {{ .key | quote }}
+        path: ca.crt
+{{- end }}
+{{- end }}
+{{- end }}
