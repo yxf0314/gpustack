@@ -133,7 +133,10 @@ processors:
       - set(log.body, "Higress access log")
       # Only the successful response's native PD coordinator ID is exported from AI statistics.
       - delete_key(log.attributes, "pd_coordinator_id")
-      - set(log.cache["ai_log"], ParseJSON(log.attributes["ai_log"])) where (log.attributes["response_code"] == 200 or log.attributes["response_code"] == "200") and IsString(log.attributes["ai_log"]) and IsMatch(log.attributes["ai_log"], "___prefill_addr_")
+      - set(log.cache["ai_log_json"], log.attributes["ai_log"]) where (log.attributes["response_code"] == 200 or log.attributes["response_code"] == "200") and IsString(log.attributes["ai_log"]) and IsMatch(log.attributes["ai_log"], "___prefill_addr_")
+      # Envoy's JSON access log can escape an already serialized AI statistics object.
+      - set(log.cache["ai_log_json"], ParseJSON(Concat(["[\"", log.cache["ai_log_json"], "\"]"], ""))[0]) where IsString(log.cache["ai_log_json"]) and HasPrefix(log.cache["ai_log_json"], "{\\\"")
+      - set(log.cache["ai_log"], ParseJSON(log.cache["ai_log_json"])) where IsString(log.cache["ai_log_json"])
       - set(log.cache["ai_log"], log.attributes["ai_log"]) where (log.attributes["response_code"] == 200 or log.attributes["response_code"] == "200") and IsMap(log.attributes["ai_log"])
       - merge_maps(log.attributes, ExtractPatterns(log.cache["ai_log"]["chat_id"], "^(?:chatcmpl-|cmpl-)(?P<pd_coordinator_id>___prefill_addr_[A-Za-z0-9_.:\\[\\]-]{1,256}___decode_addr_[A-Za-z0-9_.:\\[\\]-]{1,256}_[0-9a-fA-F]{32})$"), "upsert") where IsString(log.cache["ai_log"]["chat_id"])
       - keep_keys(log.attributes, ["request_id", "pd_coordinator_id", "method", "path", "response_code", "duration", "response_flags", "upstream_cluster", "upstream_host"])

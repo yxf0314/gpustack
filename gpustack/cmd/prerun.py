@@ -257,8 +257,10 @@ def prepare_gateway_config(cfg: Config):
     higress_embedded_kubeconfig = Path(cfg.higress_base_dir()) / "kubeconfig"
 
     if cfg.gateway_mode == GatewayModeEnum.embedded:
-        _prepare_higress_tracing(
-            higress_embedded_kubeconfig.parent / "apiserver", cfg.trace_otlp_endpoint
+        _prepare_higress_observability(
+            higress_embedded_kubeconfig.parent / "apiserver",
+            cfg.trace_otlp_endpoint,
+            log_enabled=bool(cfg.log_otlp_endpoint),
         )
         with open(config_path, "w") as f:
             f.write(f"DATA_DIR={cfg.data_dir}\n")
@@ -321,17 +323,20 @@ def _set_higress_access_log_context(
     _write_yaml_atomically(configmap_path, configmap)
 
 
-def _prepare_higress_tracing(apiserver_dir: Path, endpoint: Optional[str]) -> None:
+def _prepare_higress_observability(
+    apiserver_dir: Path, endpoint: Optional[str], *, log_enabled: bool
+) -> None:
     """Configure the embedded gateway before the file-backed API server starts."""
     configmap_path = apiserver_dir / HIGRESS_CONFIGMAP
     filter_path = apiserver_dir / "envoyfilters" / f"{_HIGRESS_TRACING_FILTER}.yaml"
-    if not endpoint:
+    enabled = bool(endpoint) or log_enabled
+    if not enabled:
         filter_path.unlink(missing_ok=True)
         if not configmap_path.exists():
             return
 
     template = yaml.safe_load((HIGRESS_DEFAULT_CONFIG / HIGRESS_CONFIGMAP).read_text())
-    if endpoint:
+    if enabled:
         resource = get_ingress_tracing_envoyfilter(
             _HIGRESS_TRACING_FILTER, template["metadata"]["namespace"], endpoint
         )

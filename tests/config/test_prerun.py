@@ -197,6 +197,30 @@ def test_disabled_tracing_leaves_fresh_higress_data_alone(embedded_gateway):
     assert not apiserver.exists()
 
 
+def test_embedded_logs_only_keeps_request_id_after_disabling_tracing(embedded_gateway):
+    cfg, apiserver, _ = embedded_gateway
+    logs = cfg.model_copy(update={"log_otlp_endpoint": "http://collector:4318/v1/logs"})
+    prerun.prepare_gateway_config(
+        logs.model_copy(update={"trace_otlp_endpoint": "collector:4317"})
+    )
+
+    prerun.prepare_gateway_config(logs)
+    config = yaml.safe_load((apiserver / HIGRESS_FILTER_PATH).read_text())
+    manager_patch, route_patch = config["spec"]["configPatches"]
+    manager = manager_patch["patch"]["value"]["typed_config"]
+    assert "tracing" not in manager
+    expected = [
+        {
+            "header": {"key": "x-gpustack-request-id", "value": "%REQ(X-REQUEST-ID)%"},
+            "append_action": "ADD_IF_ABSENT",
+        }
+    ]
+    assert manager["local_reply_config"]["mappers"][0]["headers_to_add"] == expected
+    assert route_patch["patch"]["value"]["response_headers_to_add"] == expected
+    configmap = yaml.safe_load((apiserver / HIGRESS_CONFIGMAP_PATH).read_text())
+    assert yaml.safe_load(configmap["data"]["mesh"])["accessLogEncoding"] == "TEXT"
+
+
 def test_disabling_tracing_removes_filter_even_without_configmap(embedded_gateway):
     cfg, apiserver, _ = embedded_gateway
     filter_path = apiserver / HIGRESS_FILTER_PATH

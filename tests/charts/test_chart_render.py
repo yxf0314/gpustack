@@ -199,7 +199,7 @@ def test_observability_endpoints_reach_server_and_workers(logs, traces):
             trace_endpoint if traces else None
         )
     assert "gpustack-higress-log-collector" not in names(docs, "DaemonSet")
-    assert ("gpustack-otel-tracing" in names(docs, "EnvoyFilter")) is traces
+    assert ("gpustack-otel-tracing" in names(docs, "EnvoyFilter")) is (logs or traces)
 
 
 def test_logging_references_existing_secrets():
@@ -256,16 +256,22 @@ def test_legacy_higress_log_collection_values_do_not_mount_host_logs():
 
 
 @pytest.mark.parametrize(
-    "endpoint", ["collector.monitoring.svc:4317", "10.32.1.2:4317", "[fd00::7]:4317"]
+    "endpoint",
+    ["collector.monitoring.svc:4317", "10.32.1.2:4317", "[fd00::7]:4317", None],
 )
 def test_bundled_higress_tracing_matches_embedded_settings(endpoint):
+    setting = (
+        f"tracing.endpoint={endpoint}"
+        if endpoint
+        else "logging.endpoint=http://collector:4318/v1/logs"
+    )
     docs = render(
         "--namespace",
         "inference",
         "--set",
         "higress-core.gateway.name=edge",
         "--set-string",
-        f"tracing.endpoint={endpoint}",
+        setting,
     )
     expected = get_ingress_tracing_envoyfilter(
         "gpustack-otel-tracing", "inference", endpoint
