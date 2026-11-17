@@ -79,8 +79,7 @@ function copy_extra_static() {
 # Runs after copy_extra_static, never before: download_ui does `rm -rf` on the
 # whole ui directory, so anything written there earlier is lost.
 #
-# The chart is packaged as committed, with only its dependencies vendored. Its
-# own version and appVersion are left alone: the values file the server
+# The chart's version and appVersion are left alone: the values file the server
 # generates names every image explicitly, so the chart's defaults never decide
 # what gets deployed, and the served URL stays version-free.
 function package_chart() {
@@ -125,6 +124,8 @@ function package_chart() {
       gpustack::log::fatal "failed to vendor the chart's dependencies"
     fi
   fi
+
+  uv run --no-sync python "${ROOT_DIR}/hack/prepare-helm-chart.py" "${chart_path}"
 
   rm -rf "${target_dir}"
   mkdir -p "${target_dir}"

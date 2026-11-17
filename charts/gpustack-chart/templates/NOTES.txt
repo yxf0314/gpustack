@@ -1,0 +1,6 @@
+{{- if and .Values.logging.endpoint .Values.server.enabled (index .Values "higress-core" "enabled") }}
+{{- if not (include "gpustack.higressLogSidecarEnabled" .) }}
+GPUStack application log export is enabled. The bundled Higress log collector
+requires higress-core.global.enableIstioAPI=true and higress-core.global.o11y.enabled=false.
+{{- end }}
+{{- end }}

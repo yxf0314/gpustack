@@ -141,6 +141,11 @@ function Package-Chart {
         }
     }
 
+    uv run --no-sync python "$ROOT_DIR/hack/prepare-helm-chart.py" $chartPath
+    if ($LASTEXITCODE -ne 0) {
+        GPUStack.Log.Fatal "failed to prepare the Helm chart"
+    }
+
     $null = Remove-Item -Recurse -Force $targetDir -ErrorAction Ignore
     $null = New-Item -ItemType Directory -Path $targetDir -Force
 

@@ -1,0 +1,94 @@
+{{- if include "gpustack.higressLogSidecarEnabled" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gpustack-higress-collector
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "chart_labels" . | indent 4 }}
+data:
+  collector.yaml: |
+{{ include "gpustack.higressCollectorConfig" . | indent 4 }}
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: gpustack-higress-file-log
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "chart_labels" . | indent 4 }}
+spec:
+  workloadSelector:
+    labels:
+{{ include "gateway.selectorLabels" (index .Subcharts "higress-core") | indent 6 }}
+      gpustack.io/higress-file-log: "enabled"
+  configPatches:
+    - applyTo: NETWORK_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+      patch:
+        operation: MERGE
+        value:
+          name: envoy.filters.network.http_connection_manager
+          typed_config:
+            '@type': type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+            access_log:
+              - name: envoy.access_loggers.file
+                typed_config:
+                  '@type': type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
+                  path: /var/log/proxy/access.log
+                  log_format:
+                    json_format:
+                      start_time: "%START_TIME%"
+                      request_id: "%REQ(X-REQUEST-ID)%"
+                      method: "%REQ(:METHOD)%"
+                      path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
+                      response_code: "%RESPONSE_CODE%"
+                      duration: "%DURATION%"
+                      response_flags: "%RESPONSE_FLAGS%"
+                      upstream_cluster: "%UPSTREAM_CLUSTER%"
+                      upstream_host: "%UPSTREAM_HOST%"
+                      ai_log: "%FILTER_STATE(wasm.ai_log:PLAIN)%"
+                      {{- if .Values.tracing.endpoint }}
+                      traceparent: "%REQ(TRACEPARENT):55%"
+                      {{- end }}
+{{- end }}
+
+{{- define "gpustack.higressCollectorConfig" -}}
+{{- $gateway := index .Subcharts "higress-core" -}}
+{{- $source := required "Run hack/prepare-helm-chart.py after vendoring the Helm chart dependencies." ($gateway.Files.Get "gpustack-collector.yaml") | fromYaml -}}
+{{- $receiver := index $source.receivers "filelog/higress" -}}
+{{- $_ := set $receiver "start_at" "beginning" -}}
+{{- $_ := set $receiver "include" (list "/var/log/proxy/access.log" "/var/log/proxy/access.log.[1-5]") -}}
+{{- $exporter := index $source.exporters "otlp_http/logs" -}}
+{{- $_ := set $exporter "logs_endpoint" .Values.logging.endpoint -}}
+{{- if .Values.logging.authorizationSecret.name -}}
+{{- $_ := set $exporter "headers" (dict "Authorization" "${env:GPUSTACK_LOG_OTLP_AUTHORIZATION}") -}}
+{{- end -}}
+{{- if .Values.logging.caSecret.name -}}
+{{- $_ := set $exporter "tls" (dict "ca_file" "/etc/gpustack/otel-ca/ca.crt") -}}
+{{- end }}
+extensions:
+  file_storage:
+    directory: /var/lib/otelcol
+receivers:
+  filelog/higress:
+{{ toYaml $receiver | indent 4 }}
+processors:
+  transform/higress:
+{{ toYaml (index $source.processors "transform/higress") | indent 4 }}
+exporters:
+  otlp_http/logs:
+{{ toYaml $exporter | indent 4 }}
+service:
+  telemetry:
+{{ toYaml $source.service.telemetry | indent 4 }}
+  extensions: [file_storage]
+  pipelines:
+    logs/higress:
+{{ toYaml (index $source.service.pipelines "logs/higress") | indent 6 }}
+{{- end }}
