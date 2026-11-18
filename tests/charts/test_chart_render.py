@@ -214,18 +214,20 @@ def test_logging_references_existing_secrets():
         "logging.endpoint=https://collector:4318/v1/logs",
     )
     assert "logs-auth" not in names(docs, "Secret")
-    server = next(
+    server = container_env(docs, "StatefulSet", "gpustack-server")
+    assert "GPUSTACK_LOG_OTLP_AUTHORIZATION" not in server
+    assert "GPUSTACK_LOG_OTLP_CA_FILE" not in server
+    alloy = next(
         doc
         for doc in docs
-        if doc["kind"] == "StatefulSet" and doc["metadata"]["name"] == "gpustack-server"
+        if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "gpustack-alloy"
     )
-    server_container = server["spec"]["template"]["spec"]["containers"][0]
-    env = {entry["name"]: entry for entry in server_container["env"]}
+    pod = alloy["spec"]["template"]["spec"]
+    env = {entry["name"]: entry for entry in pod["containers"][0]["env"]}
     assert env["GPUSTACK_LOG_OTLP_AUTHORIZATION"]["valueFrom"]["secretKeyRef"] == {
         "name": "logs-auth",
         "key": "authorization",
     }
-    pod = server["spec"]["template"]["spec"]
     ca = next(
         volume["secret"]
         for volume in pod["volumes"]
@@ -263,145 +265,83 @@ def test_legacy_higress_log_collection_values_do_not_mount_host_logs():
 @pytest.mark.parametrize(
     "logs,traces", [(False, False), (False, True), (True, False), (True, True)]
 )
-def test_bundled_higress_log_sidecar(kind, logs, traces):
-    settings = [
+def test_bundled_higress_uses_stdout_and_shared_alloy(kind, logs, traces):
+    docs = render(
+        "--namespace",
+        "inference",
         "--set",
         f"higress-core.gateway.kind={kind},higress-core.gateway.name=edge",
-    ]
-    if logs:
-        settings += [
-            "--set",
-            "logging.endpoint=https://otel:4318/v1/logs,"
-            "logging.authorizationSecret.name=otel-auth,"
-            "logging.authorizationSecret.key=header,"
-            "logging.caSecret.name=otel-ca,logging.caSecret.key=root.pem",
-        ]
-    if traces:
-        settings += ["--set", "tracing.endpoint=otel:4317"]
-    docs = render(*settings)
+        "--set-string",
+        f"logging.endpoint={'https://otel:4318/v1/logs' if logs else ''}",
+        "--set-string",
+        f"tracing.endpoint={'otel:4317' if traces else ''}",
+    )
     gateway = next(
         doc for doc in docs if doc["kind"] == kind and doc["metadata"]["name"] == "edge"
     )
     template = gateway["spec"]["template"]
-    pod = template["spec"]
-    containers = {container["name"]: container for container in pod["containers"]}
+    assert [entry["name"] for entry in template["spec"]["containers"]] == [
+        "higress-gateway"
+    ]
+    labels = template["metadata"]["labels"]
+    assert labels.get("gpustack.ai/log-source") == ("higress" if logs else None)
+    assert labels.get("gpustack.ai/log-release") == ("gpustack" if logs else None)
+
     higress_config = next(
         doc for doc in docs if doc["metadata"]["name"] == "higress-config"
     )
     mesh = yaml.safe_load(higress_config["data"]["mesh"])
-    stdout_fields = yaml.safe_load(mesh["accessLogFormat"])
     assert mesh["accessLogFile"] == "/dev/stdout"
-    assert mesh["accessLogEncoding"] == ("JSON" if traces else "TEXT")
-    assert ("traceparent" in stdout_fields) is traces
-    config_name = "gpustack-higress-collector"
-    assert (config_name in names(docs, "ConfigMap")) is logs
-    assert ("gpustack-higress-file-log" in names(docs, "EnvoyFilter")) is logs
+    assert mesh["accessLogEncoding"] == ("JSON" if logs or traces else "TEXT")
+    assert ("traceparent" in yaml.safe_load(mesh["accessLogFormat"])) is traces
+    assert "gpustack-higress-file-log" not in names(docs, "EnvoyFilter")
+    assert ("gpustack-alloy" in names(docs, "Deployment")) is logs
     if not logs:
-        assert set(containers) == {"higress-gateway"}
-        assert "automountServiceAccountToken" not in pod
         return
-
-    assert pod["automountServiceAccountToken"] is False
-    volumes = {volume["name"]: volume for volume in pod["volumes"]}
-    gateway_mounts = {
-        mount["mountPath"]: mount
-        for mount in containers["higress-gateway"]["volumeMounts"]
-    }
-    collector = containers["otel-collector"]
-    collector_mounts = {
-        mount["mountPath"]: mount for mount in collector["volumeMounts"]
-    }
-    log_volume = gateway_mounts["/var/log/proxy"]["name"]
-    assert "emptyDir" in volumes[log_volume]
-    assert not gateway_mounts["/var/log/proxy"].get("readOnly")
-    assert collector_mounts["/var/log/proxy"]["name"] == log_volume
-    assert collector_mounts["/var/log/proxy"]["readOnly"] is True
-    assert "/var/lib/logrotate" in gateway_mounts
-    assert "/var/lib/logrotate" not in collector_mounts
-    assert "emptyDir" in volumes[collector_mounts["/var/lib/otelcol"]["name"]]
-    assert "/var/run/secrets/tokens" in gateway_mounts
-    for mount in collector_mounts.values():
-        assert all(
-            "serviceAccountToken" not in source
-            for source in volumes[mount["name"]].get("projected", {}).get("sources", [])
-        )
-    auth = next(
-        env
-        for env in collector["env"]
-        if env["name"] == "GPUSTACK_LOG_OTLP_AUTHORIZATION"
-    )
-    assert auth["valueFrom"]["secretKeyRef"] == {"name": "otel-auth", "key": "header"}
-    assert volumes[collector_mounts["/etc/gpustack/otel-ca"]["name"]]["secret"] == {
-        "secretName": "otel-ca",
-        "items": [{"key": "root.pem", "path": "ca.crt"}],
-    }
-    file_filter = next(
-        doc["spec"]
+    alloy = next(
+        doc
         for doc in docs
-        if doc["kind"] == "EnvoyFilter"
-        and doc["metadata"]["name"] == "gpustack-higress-file-log"
+        if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "gpustack-alloy"
     )
-    selector = file_filter["workloadSelector"]["labels"]
-    assert selector.items() <= template["metadata"]["labels"].items()
-    assert selector != gateway["spec"]["selector"]["matchLabels"]
-    patch = file_filter["configPatches"][0]["patch"]
-    assert patch["operation"] == "MERGE"
-    sinks = patch["value"]["typed_config"]["access_log"]
-    assert len(sinks) == 1
-    file_sink = sinks[0]["typed_config"]
-    assert file_sink["path"] == "/var/log/proxy/access.log"
-    fields = file_sink["log_format"]["json_format"]
-    assert ("traceparent" in fields) is traces
-    assert fields["request_id"] == "%REQ(X-REQUEST-ID)%"
-    if traces:
-        assert fields["traceparent"] == stdout_fields["traceparent"]
-
-    config = next(doc for doc in docs if doc["metadata"]["name"] == config_name)
-    collector_config = yaml.safe_load(config["data"]["collector.yaml"])
-    assert set(collector_config["service"]["pipelines"]) == {"logs/higress"}
-    assert collector_config["extensions"]["file_storage"]["directory"] == (
-        "/var/lib/otelcol"
+    assert alloy["spec"]["replicas"] == 1
+    assert alloy["spec"]["strategy"]["type"] == "Recreate"
+    alloy_pod = alloy["spec"]["template"]["spec"]
+    assert alloy_pod["serviceAccountName"] == "gpustack-alloy"
+    assert all("hostPath" not in volume for volume in alloy_pod["volumes"])
+    role = next(
+        doc
+        for doc in docs
+        if doc["kind"] == "Role" and doc["metadata"]["name"] == "gpustack-alloy"
     )
-    exporter = collector_config["exporters"]["otlp_http/logs"]
-    assert exporter["logs_endpoint"] == "https://otel:4318/v1/logs"
-    assert exporter["tls"] == {"ca_file": "/etc/gpustack/otel-ca/ca.crt"}
-    assert exporter["headers"]["Authorization"] == (
-        "${env:GPUSTACK_LOG_OTLP_AUTHORIZATION}"
-    )
+    assert role["metadata"]["namespace"] == "inference"
+    assert {resource for rule in role["rules"] for resource in rule["resources"]} == {
+        "pods",
+        "pods/log",
+    }
+    assert "gpustack-alloy" not in names(docs, "ClusterRole")
 
 
-def test_higress_sidecar_preserves_first_party_token_and_pull_secrets():
+def test_existing_gateway_agent_can_disable_only_gateway_collection():
     docs = render(
         "--set",
-        "logging.endpoint=http://otel:4318/v1/logs,"
-        "higress-core.global.jwtPolicy=first-party-jwt,"
-        "higress-core.gateway.imagePullSecrets[0].name=gateway-registry,"
-        "global.imagePullSecrets[0].name=app-registry",
+        "worker.enabled=true,logging.higress.enabled=false,"
+        "logging.endpoint=http://otel:4318/v1/logs",
     )
     gateway = next(
         doc
         for doc in docs
         if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "higress-gateway"
     )
-    pod = gateway["spec"]["template"]["spec"]
-    containers = {container["name"]: container for container in pod["containers"]}
-    api_mount = next(
-        mount
-        for mount in containers["higress-gateway"]["volumeMounts"]
-        if mount["mountPath"] == "/var/run/secrets/kubernetes.io/serviceaccount"
+    assert (
+        "gpustack.ai/log-source"
+        not in gateway["spec"]["template"]["metadata"]["labels"]
     )
-    assert api_mount["readOnly"] is True
-    token_volume = next(v for v in pod["volumes"] if v["name"] == api_mount["name"])
-    assert any(
-        source.get("serviceAccountToken", {}).get("path") == "token"
-        for source in token_volume["projected"]["sources"]
-    )
-    assert api_mount["name"] not in {
-        mount["name"] for mount in containers["otel-collector"]["volumeMounts"]
-    }
-    assert {"gateway-registry", "app-registry"} <= {
-        secret["name"] for secret in pod["imagePullSecrets"]
-    }
+    assert "gpustack-alloy" in names(docs, "Deployment")
+    for kind, name in (
+        ("StatefulSet", "gpustack-server"),
+        ("DaemonSet", "gpustack-worker"),
+    ):
+        assert container_env(docs, kind, name)["GPUSTACK_LOG_POD_RELEASE"] == "gpustack"
 
 
 def test_bundled_higress_tracing_preserves_custom_stdout_format():
@@ -426,9 +366,7 @@ def test_bundled_higress_tracing_preserves_custom_stdout_format():
         ("higress-core.global.o11y.enabled=true", {"higress-gateway", "promtail"}),
     ],
 )
-def test_higress_logs_keep_existing_layout_when_sidecar_unavailable(
-    setting, containers
-):
+def test_higress_logs_keep_existing_gateway_pod_layout(setting, containers):
     docs = render(
         "--set",
         f"{setting},logging.endpoint=http://otel:4318/v1/logs",

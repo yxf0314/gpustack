@@ -2,14 +2,18 @@ import os
 import sys
 import argparse
 from glob import escape as escape_glob
+import json
 import logging
 from pathlib import Path
+import re
 from shutil import move
+from string import Template
 from tempfile import NamedTemporaryFile
 from typing import List, Dict, Optional
 from urllib.parse import urlsplit
 
 import yaml
+from gpustack_runtime import envs as runtime_envs
 from gpustack.config.config import Config
 from gpustack.schemas.config import GatewayModeEnum
 from gpustack.envs import MIGRATION_DATA_DIR, DATA_MIGRATION
@@ -43,7 +47,9 @@ from gpustack.utils.s6_services import (
 from gpustack.worker.log_export import ENGINE_LOG_EXPORT_DIR
 
 logger = logging.getLogger(__name__)
-APPLICATION_LOG_COLLECTOR_TEMPLATE = Path("/etc/gpustack/logging/collector.yaml")
+ALLOY_LOG_TEMPLATE = Path("/etc/gpustack/logging/docker.alloy.tmpl")
+_DOCKER_MOUNTINFO = Path("/proc/self/mountinfo")
+_DOCKER_CONTAINER_MOUNT = re.compile(r"/containers/([0-9a-f]{64})/[^/]+$")
 _HIGRESS_TRACING_FILTER = "gpustack-otel-tracing"
 
 
@@ -293,13 +299,17 @@ current-context: higress
 
 
 def _write_yaml_atomically(path: Path, content: dict) -> None:
+    _write_text_atomically(path, yaml.safe_dump(content, sort_keys=False))
+
+
+def _write_text_atomically(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with NamedTemporaryFile(
         mode="w", encoding="utf-8", dir=path.parent, delete=False
     ) as output:
         temporary_path = Path(output.name)
         try:
-            yaml.safe_dump(content, output, sort_keys=False)
+            output.write(content)
             output.close()
             temporary_path.replace(path)
         finally:
@@ -346,7 +356,7 @@ def _prepare_higress_observability(
     _set_higress_access_log_context(configmap_path, template, bool(endpoint))
 
 
-def _otlp_logs_exporter(cfg: Config) -> dict:
+def _log_export_options(cfg: Config) -> dict:
     endpoint = cfg.log_otlp_endpoint or ""
     try:
         url = urlsplit(endpoint)
@@ -375,55 +385,97 @@ def _otlp_logs_exporter(cfg: Config) -> dict:
     if any(ord(character) < 32 or ord(character) == 127 for character in authorization):
         raise ValueError("Invalid OTLP Authorization header")
 
-    # Collector expands dollar signs in its own configuration.
-    exporter = {"logs_endpoint": endpoint.replace("$", "$$")}
-    if authorization:
-        exporter["headers"] = {"Authorization": authorization.replace("$", "$$")}
-    if cfg.log_otlp_ca_file:
-        exporter["tls"] = {"ca_file": cfg.log_otlp_ca_file.replace("$", "$$")}
-    return exporter
+    headers = (
+        f'{{"Authorization" = {json.dumps(authorization)}}}' if authorization else "{}"
+    )
+    return {
+        "endpoint": json.dumps(endpoint),
+        "headers": headers,
+        "ca_file": json.dumps(cfg.log_otlp_ca_file or ""),
+    }
+
+
+def _docker_application_log_receiver() -> str:
+    # Docker bind-mounts these generated files even with a custom hostname
+    # or a private cgroup namespace.
+    container_ids = set()
+    try:
+        for line in _DOCKER_MOUNTINFO.read_text().splitlines():
+            fields = line.split(maxsplit=5)
+            if len(fields) < 5 or fields[4] not in (
+                "/etc/hostname",
+                "/etc/hosts",
+                "/etc/resolv.conf",
+            ):
+                continue
+            match = _DOCKER_CONTAINER_MOUNT.search(fields[3])
+            if match:
+                container_ids.add(match[1])
+    except OSError:
+        pass
+
+    if len(container_ids) != 1:
+        logger.warning("Unable to identify this Docker container for application logs")
+        return ""
+
+    (container_id,) = container_ids
+    host = runtime_envs.GPUSTACK_RUNTIME_DOCKER_HOST.removeprefix("http+")
+    return f'''loki.source.docker "application" {{
+  host = {json.dumps(host)}
+  targets = [{{"__meta_docker_container_id" = {json.dumps(container_id)}}}]
+  forward_to = [otelcol.receiver.loki.application.receiver]
+}}
+
+otelcol.receiver.loki "application" {{
+  output {{
+    logs = [gpustack.logs.export.application]
+  }}
+}}'''
 
 
 def prepare_log_collection(cfg: Config) -> bool:
-    """Generate the per-container Collector config when log export is configured."""
-    path = (
-        Path(os.getenv("GPUSTACK_RUN_DIR", "/run/gpustack")) / "logging/collector.yaml"
-    )
+    """Generate the Docker Alloy config when log export is configured."""
+    path = Path(os.getenv("GPUSTACK_RUN_DIR", "/run/gpustack")) / "logging/config.alloy"
     try:
         path.unlink(missing_ok=True)
-        if not cfg.log_otlp_endpoint:
+        if not cfg.log_otlp_endpoint or cfg.log_pod_release:
             return False
 
-        exporter = _otlp_logs_exporter(cfg)
-        config = yaml.safe_load(APPLICATION_LOG_COLLECTOR_TEMPLATE.read_text())
-        config["extensions"]["file_storage"]["directory"] = str(
-            Path(cfg.data_dir) / "log-collector"
-        ).replace("$", "$$")
-        directory = escape_glob(str(Path(cfg.log_dir))).replace("$", "$$")
-        receivers = config["receivers"]
-        receivers["filelog/application"]["include"] = [
-            f"{directory}/application/{role}.jsonl{suffix}"
-            for role in ("server", "worker")
-            for suffix in ("", ".[12]")
-        ]
-        receivers["filelog/engine"]["include"] = [
+        options = _log_export_options(cfg)
+        directory = escape_glob(str(Path(cfg.log_dir)))
+        state = Path(cfg.data_dir) / "log-collector"
+        engine = [
             f"{directory}/{ENGINE_LOG_EXPORT_DIR}/archives/*/{name}{suffix}"
             for name in ("container.log", "container.workload-*.log")
             for suffix in ("", ".[0-9]*")
         ]
+        higress_receiver = ""
         if cfg.gateway_mode == GatewayModeEnum.embedded:
-            receivers["filelog/higress"]["include"] = [
+            higress = [
                 f"{directory}/higress/access.log{suffix}" for suffix in ("", ".[1-5]")
             ]
-        else:
-            del receivers["filelog/higress"]
-            del config["processors"]["transform/higress"]
-            del config["service"]["pipelines"]["logs/higress"]
-        config["exporters"]["otlp_http/logs"].update(exporter)
+            higress_receiver = f'''otelcol.receiver.filelog "higress" {{
+  include = {json.dumps(higress)}
+  start_at = "end"
+  storage = otelcol.storage.file.offsets.handler
 
+  output {{
+    logs = [gpustack.logs.export.higress]
+  }}
+}}'''
+
+        config = Template(ALLOY_LOG_TEMPLATE.read_text()).substitute(
+            **options,
+            offsets=json.dumps(str(state)),
+            application_receiver=_docker_application_log_receiver(),
+            engine=json.dumps(engine),
+            higress_receiver=higress_receiver,
+        )
+
+        _write_text_atomically(path.with_name("storage-path"), str(state / "alloy"))
         # The generated config can contain credentials. The temporary file has mode 0600.
-        _write_yaml_atomically(path, config)
-    except (OSError, TypeError, KeyError, ValueError, yaml.YAMLError) as exc:
+        _write_text_atomically(path, config)
+    except (OSError, TypeError, KeyError, ValueError) as exc:
         logger.error("Unable to enable application log collection: %s", exc)
         return False
     return True

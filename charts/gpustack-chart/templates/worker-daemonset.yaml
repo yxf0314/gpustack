@@ -71,6 +71,10 @@ spec:
     metadata:
       labels:
         app: {{ $w.dsName }}
+        {{- if $.Values.logging.endpoint }}
+        gpustack.ai/log-release: {{ $.Release.Name | quote }}
+        gpustack.ai/log-source: application
+        {{- end }}
         {{- if $multiVendor }}
         app.kubernetes.io/component: worker
         gpustack.io/runtime: {{ $w.name }}
@@ -222,9 +226,6 @@ spec:
               mountPath: /usr/local/PPU_SDK
               readOnly: true
             {{- end }}
-            {{- with (include "gpustack.loggingCaMount" $ | trim) }}
-            {{- . | nindent 12 }}
-            {{- end }}
             {{- with $.Values.worker.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -333,9 +334,6 @@ spec:
           hostPath:
             path: /usr/local/PPU_SDK
             type: DirectoryOrCreate
-        {{- end }}
-        {{- with (include "gpustack.loggingCaVolume" $ | trim) }}
-        {{- . | nindent 8 }}
         {{- end }}
         {{- with $.Values.worker.extraVolumes }}
         {{- toYaml . | nindent 8 }}

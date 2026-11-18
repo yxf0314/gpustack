@@ -89,6 +89,9 @@ image:
 logging:
   # Full OTLP/HTTP logs URL, including /v1/logs. Empty disables export.
   endpoint: ""
+  higress:
+    # Disable when another agent already collects the bundled gateway's stdout.
+    enabled: true
   # Optional existing Secret in this release's namespace. The value is the
   # complete Authorization header. Credentials and custom CAs require HTTPS.
   authorizationSecret:

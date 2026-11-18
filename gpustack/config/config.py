@@ -378,6 +378,7 @@ class Config(WorkerConfig, BaseSettings):
     log_otlp_endpoint: Optional[str] = Field(default=None, repr=False)
     log_otlp_authorization: Optional[SecretStr] = Field(default=None, repr=False)
     log_otlp_ca_file: Optional[str] = None
+    log_pod_release: Optional[str] = None
     trace_otlp_endpoint: Optional[str] = None
     builtin_prometheus_port: int = 19090
     prometheus_url: Optional[str] = None

@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import re
 
 import pytest
@@ -67,16 +68,31 @@ def collector_path(tmp_path, monkeypatch):
     run = tmp_path / "run"
     monkeypatch.setenv("GPUSTACK_RUN_DIR", str(run))
     template = (
-        Path(__file__).parents[2] / "pack/rootfs/etc/gpustack/logging/collector.yaml"
+        Path(__file__).parents[2] / "pack/rootfs/etc/gpustack/logging/docker.alloy.tmpl"
     )
-    monkeypatch.setattr(prerun, "APPLICATION_LOG_COLLECTOR_TEMPLATE", template)
-    return run / "logging" / "collector.yaml"
+    monkeypatch.setattr(prerun, "ALLOY_LOG_TEMPLATE", template)
+    return run / "logging" / "config.alloy"
 
 
 @pytest.mark.parametrize("worker", [False, True])
 def test_log_collector_is_independent_of_builtin_observability(
     tmp_path, monkeypatch, collector_path, worker
 ):
+    container_id = "a" * 64
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        f"17 16 8:1 /var/lib/docker/containers/{container_id}/hosts /etc/hosts "
+        "rw,relatime - ext4 /dev/root rw\n"
+        f"18 16 8:1 /var/lib/docker/containers/{container_id}/hostname /etc/hostname "
+        "rw,relatime - ext4 /dev/root rw\n"
+    )
+    monkeypatch.setattr(prerun, "_DOCKER_MOUNTINFO", mountinfo)
+    monkeypatch.setenv("HOSTNAME", "custom-hostname")
+    monkeypatch.setattr(
+        prerun.runtime_envs,
+        "GPUSTACK_RUNTIME_DOCKER_HOST",
+        "http+unix:///run/docker-alt.sock",
+    )
     monkeypatch.setenv(
         "GPUSTACK_LOG_OTLP_ENDPOINT", "https://collector.example/v1/logs"
     )
@@ -91,29 +107,34 @@ def test_log_collector_is_independent_of_builtin_observability(
     )
 
     assert prerun.prepare_log_collection(cfg)
-    assert "otel-collector" in prerun.determine_enabled_services(cfg, logs_active=True)
+    assert "alloy" in prerun.determine_enabled_services(cfg, logs_active=True)
     assert "prometheus" not in prerun.determine_enabled_services(cfg, logs_active=True)
     assert collector_path.stat().st_mode & 0o777 == 0o600
-    rendered = yaml.safe_load(collector_path.read_text())
-    include = rendered["receivers"]["filelog/application"]["include"]
-    assert rendered["receivers"]["filelog/application"]["operators"][0]["parse_ints"]
-    assert str(tmp_path / "logs/application/server.jsonl") in include
-    assert str(tmp_path / "logs/application/worker.jsonl") in include
-    assert "filelog/higress" not in rendered["receivers"]
-    assert "logs/higress" not in rendered["service"]["pipelines"]
-    assert rendered["receivers"]["filelog/engine"]["include"] == [
-        str(tmp_path / f"logs/engine-export/archives/*/{name}{suffix}")
-        for name in ("container.log", "container.workload-*.log")
-        for suffix in ("", ".[0-9]*")
-    ]
-    exporter = rendered["exporters"]["otlp_http/logs"]
-    assert exporter["logs_endpoint"] == "https://collector.example/v1/logs"
-    assert exporter["headers"] == {"Authorization": "Bearer literal$$token"}
-    assert exporter["sending_queue"]["queue_size"] == 16 * 1024**2
-    assert exporter["retry_on_failure"]["max_elapsed_time"] == "300s"
+    rendered = collector_path.read_text()
+    assert 'loki.source.docker "application"' in rendered
+    assert 'host = "unix:///run/docker-alt.sock"' in rendered
+    assert (
+        f'targets = [{{"__meta_docker_container_id" = "{container_id}"}}]' in rendered
+    )
+    assert "otelcol.receiver.loki.application.receiver" in rendered
+    assert "gpustack.logs.export.application" in rendered
+    assert ".jsonl" not in rendered
+    assert collector_path.with_name("storage-path").read_text() == str(
+        tmp_path / "data/log-collector/alloy"
+    )
+    assert 'otelcol.receiver.filelog "higress"' not in rendered
+    for name in ("container.log", "container.workload-*.log"):
+        assert (
+            str(tmp_path / f"logs/engine-export/archives/*/{name}.[0-9]*") in rendered
+        )
+    assert 'endpoint = "https://collector.example/v1/logs"' in rendered
+    assert 'headers = {"Authorization" = "Bearer literal$token"}' in rendered
 
 
-def test_embedded_gateway_adds_rotating_access_log(tmp_path, collector_path):
+def test_missing_docker_identity_keeps_file_sources(
+    tmp_path, monkeypatch, collector_path, caplog
+):
+    monkeypatch.setattr(prerun, "_DOCKER_MOUNTINFO", tmp_path / "missing-mountinfo")
     cfg = Config(
         data_dir=str(tmp_path / "data"),
         log_dir=str(tmp_path / "logs"),
@@ -121,11 +142,15 @@ def test_embedded_gateway_adds_rotating_access_log(tmp_path, collector_path):
         log_otlp_endpoint="http://collector/v1/logs",
     )
     assert prerun.prepare_log_collection(cfg)
-    rendered = yaml.safe_load(collector_path.read_text())
-    assert rendered["receivers"]["filelog/higress"]["include"] == [
-        str(tmp_path / "logs/higress/access.log"),
-        str(tmp_path / "logs/higress/access.log.[1-5]"),
-    ]
+    rendered = collector_path.read_text()
+    assert (
+        "Unable to identify this Docker container for application logs" in caplog.text
+    )
+    assert 'loki.source.docker "application"' not in rendered
+    assert 'otelcol.receiver.filelog "higress"' in rendered
+    assert 'otelcol.receiver.filelog "engine"' in rendered
+    assert str(tmp_path / "logs/higress/access.log") in rendered
+    assert str(tmp_path / "logs/higress/access.log.[1-5]") in rendered
 
 
 @pytest.fixture
@@ -292,11 +317,11 @@ def test_disabled_collector_removes_stale_config_and_service(tmp_path, collector
 
     assert not prerun.prepare_log_collection(cfg)
     assert not collector_path.exists()
-    assert "otel-collector" not in prerun.determine_enabled_services(cfg)
+    assert "alloy" not in prerun.determine_enabled_services(cfg)
 
     s6_base_path = tmp_path / "s6-rc.d"
-    prepare_s6_overlay(["otel-collector"], [], s6_base_path)
-    service = s6_base_path / "user/contents.d/otel-collector"
+    prepare_s6_overlay(["alloy"], [], s6_base_path)
+    service = s6_base_path / "user/contents.d/alloy"
     assert service.exists()
     prepare_s6_overlay([], [], s6_base_path)
     assert not service.exists()
@@ -325,14 +350,25 @@ def test_invalid_otlp_settings_skip_collector_without_logging_secrets(
     assert "private" not in caplog.text
 
 
+def test_helm_logging_does_not_start_a_container_collector(tmp_path, collector_path):
+    cfg = Config(
+        data_dir=str(tmp_path / "data"),
+        log_otlp_endpoint="http://collector/v1/logs",
+        log_pod_release="inference",
+    )
+
+    assert not prerun.prepare_log_collection(cfg)
+    assert not collector_path.exists()
+
+
 def test_vllm_pd_logs_keep_native_engine_and_coordinator_ids(collector_path):
-    template = yaml.safe_load(prerun.APPLICATION_LOG_COLLECTOR_TEMPLATE.read_text())
-    receiver = template["receivers"]["filelog/engine"]
-    parsers = {
-        operator["id"]: re.compile(operator["regex"])
-        for operator in receiver["operators"]
-        if operator.get("type") == "regex_parser"
-    }
+    pipeline = prerun.ALLOY_LOG_TEMPLATE.with_name("common.alloy").read_text()
+    patterns = [
+        re.compile(json.loads(literal))
+        for literal in re.findall(
+            r'ExtractPatterns\(log\.body, ("(?:[^"\\]|\\.)*")\)', pipeline
+        )
+    ]
     coordinator = (
         "___prefill_addr_127.0.0.1:8000___decode_addr_[::1]:9000_"
         "78651a8e19a445a3a3ce157e1578f1d7"
@@ -342,16 +378,22 @@ def test_vllm_pd_logs_keep_native_engine_and_coordinator_ids(collector_path):
         f"0_chatcmpl-{coordinator}_0-92309ad8",
     ):
         line = f"(APIServer pid=12) INFO 11-16 08:01:00 Added request {engine_id}."
-        assert parsers["vllm_pd_engine_coordinator"].fullmatch(line).groupdict() == {
-            "engine_request_id": engine_id,
-            "pd_coordinator_id": coordinator,
-        }
+        assert any(
+            (match := pattern.fullmatch(line))
+            and match.groupdict()
+            == {
+                "engine_request_id": engine_id,
+                "pd_coordinator_id": coordinator,
+            }
+            for pattern in patterns
+        )
 
     router = (
         "2026-11-16 08:01:00 DEBUG vllm_router_rs::routers::http::vllm_pd_router: "
         f"src/routers/http/vllm_pd_router.rs:1323: Generated vLLM request ID: {coordinator}"
     )
-    assert re.match(receiver["multiline"]["line_start_pattern"], router)
-    assert parsers["vllm_pd_router_coordinator"].fullmatch(router).groupdict() == {
-        "pd_coordinator_id": coordinator
-    }
+    assert any(
+        (match := pattern.fullmatch(router))
+        and match.groupdict() == {"pd_coordinator_id": coordinator}
+        for pattern in patterns
+    )

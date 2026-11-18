@@ -1,5 +1,0 @@
-#!/command/with-contenv /bin/sh
-# shellcheck shell=sh
-set -eu
-exec /usr/local/bin/otelcol-contrib \
-    --config="${GPUSTACK_RUN_DIR:-/run/gpustack}/logging/collector.yaml"

@@ -85,7 +85,7 @@ from gpustack.worker.log_sources import (
     list_log_sources,
 )
 from gpustack.worker.container_logs import ContainerLogPersister
-from gpustack.worker.log_export import EngineLogExport
+from gpustack.worker.log_export import EngineLogExport, pod_log_labels
 from gpustack.worker.model_meta import get_meta_from_running_instance
 from gpustack.client import ClientSet
 from gpustack.client.distributed_port_client import DistributedPortClient
@@ -464,7 +464,9 @@ class ServeManager(ContainerLogPersister):
         self._worker_id_getter = worker_id_getter
         self._config = cfg
         self._serve_log_dir = f"{cfg.log_dir}/serve"
-        if getattr(cfg, "log_otlp_endpoint", None):
+        if getattr(cfg, "log_otlp_endpoint", None) and not getattr(
+            cfg, "log_pod_release", None
+        ):
             self._log_export = EngineLogExport(Path(cfg.log_dir))
         self._clientset_getter = clientset_getter
 
@@ -885,6 +887,7 @@ class ServeManager(ContainerLogPersister):
                     **(plan.labels or {}),
                     **self._managed_workload_labels(mi),
                     **self._component_workload_labels(item),
+                    **pod_log_labels(self._config, mi, self._worker_id),
                 }
                 create_workload(plan)
                 if item.component is not None:
@@ -1216,6 +1219,7 @@ class ServeManager(ContainerLogPersister):
             **(plan.labels or {}),
             **self._managed_workload_labels(current),
             **self._component_workload_labels(item),
+            **pod_log_labels(self._config, current, self._worker_id, role="router"),
         }
         # CPU preparation is pure and synchronous under the instance lifecycle
         # lock; a stop cannot acknowledge absence while this create is in flight.

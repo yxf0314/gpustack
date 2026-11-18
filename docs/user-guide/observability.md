@@ -127,6 +127,8 @@ GPUSTACK_TRACE_OTLP_ENDPOINT='<collector-host>:4317'
 
 Pass them with `docker run -e` or under `environment` in your Compose file. The log endpoint is the full OTLP/HTTP URL. The trace endpoint is an OTLP/gRPC `host:port` without a URL scheme.
 
+GPUStack starts Alloy inside each container configured for log export. Alloy reads Server and Worker output through the Docker Logs API. Provide access to the local Docker daemon, typically with `--volume /var/run/docker.sock:/var/run/docker.sock`. Docker Workers already use this mount. The container's logging driver must support reading logs through `docker logs` and controls retention. Alloy also reads the embedded Higress access log and existing engine archives from disk.
+
 For an HTTPS log endpoint, set `GPUSTACK_LOG_OTLP_AUTHORIZATION` to the full authorization header value when the receiver requires it. If the endpoint uses a private CA, mount the certificate read-only and set `GPUSTACK_LOG_OTLP_CA_FILE` to its path inside the container.
 
 ### Configure Helm
@@ -142,7 +144,9 @@ tracing:
 
 Use a namespace-qualified Service DNS name for a Collector in another namespace. With an HTTPS log endpoint, `logging.authorizationSecret` and `logging.caSecret` take a `name` and a `key` from existing Secrets in the release namespace. Their default keys are `authorization` and `ca.crt`.
 
-On Kubernetes, use your existing logging agent to collect Higress access logs from the gateway's stdout. The bundled gateway's default access log format includes `request_id` and includes `traceparent` when tracing is enabled. If you manage Higress separately, configure tracing in that gateway and propagate W3C `traceparent` to the inference backends.
+Setting `logging.endpoint` deploys one Alloy instance per Helm release. Alloy reads the release's GPUStack Pod logs using the Kubernetes API. If an existing agent collects the bundled Higress gateway's stdout, set `logging.higress.enabled=false` to leave those logs with that agent.
+
+The bundled gateway's default access log format includes `request_id` and includes `traceparent` when tracing is enabled. If you manage Higress separately, configure tracing in that gateway and propagate W3C `traceparent` to the inference backends.
 
 !!! note
 

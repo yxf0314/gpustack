@@ -88,7 +88,7 @@ observability_services = S6Services(
     S6Service("prometheus", ["builtin_prometheus_port"]),
     support_pipeline=True,
 )
-log_collection_services = S6Services(S6Service("otel-collector"))
+log_collection_services = S6Services(S6Service("alloy"))
 
 
 def all_services() -> List[str]:

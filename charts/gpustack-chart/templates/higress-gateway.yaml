@@ -1,15 +1,18 @@
 {{- with (index .Subcharts "higress-core") }}
-{{- if .Files.Get "gpustack-collector.yaml" }}
+{{- if .Files.Get "gpustack-observability" }}
 {{- $gateway := . }}
 {{- $configGateway := $gateway }}
-{{- if and $.Values.server.enabled $.Values.tracing.endpoint }}
+{{- $collectLogs := include "gpustack.collectHigressLogs" $ }}
+{{- if and $.Values.server.enabled (or $.Values.tracing.endpoint $collectLogs) }}
 {{- $defaults := include "mesh" $configGateway | fromYaml }}
 {{- $mesh := $configGateway.Values.meshConfig | default dict }}
 {{- $format := $mesh.accessLogFormat | default $defaults.accessLogFormat }}
 {{- $encoding := $mesh.accessLogEncoding | default $defaults.accessLogEncoding }}
 {{- if and (eq ($format | trim) ($defaults.accessLogFormat | trim)) (eq $encoding $defaults.accessLogEncoding) }}
-{{- $traceFormat := replace `"trace_id":"%REQ(X-B3-TRACEID)%"` `"traceparent":"%REQ(TRACEPARENT):55%"` $format }}
-{{- $mesh = mergeOverwrite (deepCopy $mesh) (dict "accessLogEncoding" "JSON" "accessLogFormat" $traceFormat) }}
+{{- if $.Values.tracing.endpoint }}
+{{- $format = replace `"trace_id":"%REQ(X-B3-TRACEID)%"` `"traceparent":"%REQ(TRACEPARENT):55%"` $format }}
+{{- end }}
+{{- $mesh = mergeOverwrite (deepCopy $mesh) (dict "accessLogEncoding" "JSON" "accessLogFormat" $format) }}
 {{- $values := set (omit $configGateway.Values "meshConfig") "meshConfig" $mesh }}
 {{- $configGateway = set (omit $configGateway "Values") "Values" $values }}
 {{- end }}
@@ -19,113 +22,15 @@
 {{- if has $kind (list "Deployment" "DaemonSet") }}
 {{- printf "\n---\n" }}
 {{- $manifest := include (printf "gpustack.higress.%s" $kind) $gateway }}
-{{- if include "gpustack.higressLogSidecarEnabled" $ }}
+{{- if $collectLogs }}
 {{- $workload := $manifest | fromYaml }}
-{{- $template := $workload.spec.template }}
-{{- $pod := $template.spec }}
-{{- $_ := set $template.metadata.labels "gpustack.io/higress-file-log" "enabled" }}
-{{- $_ := set $template.metadata.annotations "checksum/gpustack-higress-collector" (include "gpustack.higressCollectorConfig" $ | sha256sum) }}
-{{- $_ := set $pod "automountServiceAccountToken" false }}
-{{- $pullSecrets := uniq (concat ($pod.imagePullSecrets | default list) ($.Values.global.imagePullSecrets | default list)) }}
-{{- if $pullSecrets }}
-{{- $_ := set $pod "imagePullSecrets" $pullSecrets }}
-{{- end }}
-{{- $security := $pod.securityContext | default dict }}
-{{- if not (hasKey $security "fsGroup") }}
-{{- $_ := set $security "fsGroup" 1337 }}
-{{- end }}
-{{- $_ := set $pod "securityContext" $security }}
-
-{{- $volumes := concat $pod.volumes (include "gpustack.higressCollectorVolumes" $ | fromYamlArray) }}
-{{- $mounts := list
-  (dict "name" "gpustack-higress-access" "mountPath" "/var/log/proxy")
-  (dict "name" "gpustack-higress-logrotate" "mountPath" "/var/lib/logrotate")
-}}
-{{- if eq (include "controller.jwtPolicy" $gateway) "first-party-jwt" }}
-{{/* Replicate the default API projection for the gateway so the sidecar cannot mount it. */}}
-{{- $volumes = append $volumes (include "gpustack.higressFirstPartyToken" $ | fromYaml) }}
-{{- $mounts = append $mounts (dict "name" "gpustack-higress-api-token" "mountPath" "/var/run/secrets/kubernetes.io/serviceaccount" "readOnly" true) }}
-{{- end }}
-
-{{- range $pod.containers }}
-{{- if eq .name "higress-gateway" }}
-{{- $_ := set . "volumeMounts" (concat .volumeMounts $mounts) }}
-{{- end }}
-{{- end }}
-{{- $_ := set $pod "volumes" $volumes }}
-{{- $_ := set $pod "containers" (append $pod.containers (include "gpustack.higressCollectorContainer" $ | fromYaml)) }}
+{{- $labels := $workload.spec.template.metadata.labels }}
+{{- $_ := set $labels "gpustack.ai/log-release" $.Release.Name }}
+{{- $_ := set $labels "gpustack.ai/log-source" "higress" }}
 {{- toYaml $workload }}
 {{- else }}
 {{- $manifest }}
 {{- end }}
 {{- end }}
 {{- end }}
-{{- end }}
-
-{{- define "gpustack.higressCollectorContainer" -}}
-name: otel-collector
-image: {{ printf "%s:%s" (include "gpustack.image" .) (include "gpustack.imageTag" .) | quote }}
-imagePullPolicy: {{ .Values.image.pullPolicy }}
-command: ["/usr/local/bin/otelcol-contrib"]
-args: ["--config=/etc/gpustack/higress-collector/collector.yaml"]
-{{- with (include "gpustack.loggingAuthorizationEnv" .) }}
-env:
-{{ . | indent 2 }}
-{{- end }}
-securityContext:
-  allowPrivilegeEscalation: false
-  capabilities:
-    drop: ["ALL"]
-  readOnlyRootFilesystem: true
-  runAsNonRoot: true
-  runAsUser: 1337
-  runAsGroup: 1337
-resources:
-  requests:
-    cpu: 25m
-    memory: 64Mi
-  limits:
-    memory: 256Mi
-volumeMounts:
-  - name: gpustack-higress-access
-    mountPath: /var/log/proxy
-    readOnly: true
-  - name: gpustack-higress-cursor
-    mountPath: /var/lib/otelcol
-  - name: gpustack-higress-collector
-    mountPath: /etc/gpustack/higress-collector
-    readOnly: true
-{{- include "gpustack.loggingCaMount" . | indent 2 }}
-{{- end }}
-
-{{- define "gpustack.higressCollectorVolumes" -}}
-- name: gpustack-higress-access
-  emptyDir: {}
-- name: gpustack-higress-logrotate
-  emptyDir: {}
-- name: gpustack-higress-cursor
-  emptyDir: {}
-- name: gpustack-higress-collector
-  configMap:
-    name: gpustack-higress-collector
-{{- include "gpustack.loggingCaVolume" . }}
-{{- end }}
-
-{{- define "gpustack.higressFirstPartyToken" -}}
-name: gpustack-higress-api-token
-projected:
-  sources:
-    - serviceAccountToken:
-        path: token
-        expirationSeconds: 3607
-    - configMap:
-        name: kube-root-ca.crt
-        items:
-          - key: ca.crt
-            path: ca.crt
-    - downwardAPI:
-        items:
-          - path: namespace
-            fieldRef:
-              fieldPath: metadata.namespace
 {{- end }}

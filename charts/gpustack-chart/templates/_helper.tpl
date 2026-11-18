@@ -373,11 +373,8 @@ imagePullSecrets:
 {{- with .Values.logging.endpoint }}
 - name: GPUSTACK_LOG_OTLP_ENDPOINT
   value: {{ . | quote }}
-{{- include "gpustack.loggingAuthorizationEnv" $ }}
-{{- if $.Values.logging.caSecret.name }}
-- name: GPUSTACK_LOG_OTLP_CA_FILE
-  value: /etc/gpustack/otel-ca/ca.crt
-{{- end }}
+- name: GPUSTACK_LOG_POD_RELEASE
+  value: {{ $.Release.Name | quote }}
 {{- end }}
 {{- with .Values.tracing.endpoint }}
 - name: GPUSTACK_TRACE_OTLP_ENDPOINT
@@ -416,11 +413,8 @@ imagePullSecrets:
 {{- end }}
 {{- end }}
 
-{{- define "gpustack.higressLogSidecarEnabled" -}}
-{{- if and .Values.logging.endpoint .Values.server.enabled (index .Values "higress-core" "enabled") -}}
-{{- $gateway := index .Subcharts "higress-core" -}}
-{{- if and $gateway.Values.global.enableIstioAPI (not $gateway.Values.global.o11y.enabled) -}}
+{{- define "gpustack.collectHigressLogs" -}}
+{{- if and .Values.logging.endpoint .Values.server.enabled (index .Values "higress-core" "enabled") (not (index .Values "higress-core" "global" "o11y" "enabled")) (dig "enabled" true (.Values.logging.higress | default dict)) -}}
 true
-{{- end -}}
 {{- end -}}
 {{- end -}}

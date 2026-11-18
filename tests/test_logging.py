@@ -1,7 +1,5 @@
 import json
 import logging
-from pathlib import Path
-from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -16,13 +14,22 @@ def configure_logging(monkeypatch):
     level = root.level
     configured = False
 
-    def configure(tmp_path, role="server", *, endpoint="http://collector/v1/logs"):
+    def configure(
+        tmp_path,
+        role="server",
+        *,
+        endpoint="http://collector/v1/logs",
+        pod_release=None,
+    ):
         nonlocal configured
         if not configured:
             monkeypatch.setattr(root, "handlers", [])
             configured = True
         cfg = SimpleNamespace(
-            debug=True, log_dir=str(tmp_path), log_otlp_endpoint=endpoint
+            debug=True,
+            log_dir=str(tmp_path),
+            log_otlp_endpoint=endpoint,
+            log_pod_release=pod_release,
         )
         app_logging.setup_application_logging(cfg, role)
         return root.handlers[0]
@@ -43,7 +50,9 @@ def test_logging_without_endpoint_keeps_text(configure_logging, tmp_path, capsys
     assert not (tmp_path / "application").exists()
 
 
-def test_uvicorn_startup_keeps_application_file_open(configure_logging, tmp_path):
+def test_uvicorn_startup_keeps_structured_console_output(
+    configure_logging, tmp_path, capsys
+):
     handler = configure_logging(tmp_path)
     uvicorn.Config(
         app="gpustack.server.app:create_app",
@@ -51,18 +60,18 @@ def test_uvicorn_startup_keeps_application_file_open(configure_logging, tmp_path
     )
 
     logging.getLogger("test.application").info("API started")
-    handler.close()
 
-    row = (tmp_path / "application/server.jsonl").read_text()
-    assert json.loads(row)["message"] == "API started"
+    assert handler in logging.getLogger().handlers
+    assert json.loads(capsys.readouterr().err)["message"] == "API started"
 
 
 @pytest.mark.parametrize("role", ["server", "worker"])
-def test_application_log_matches_console_and_preserves_context(
-    configure_logging, tmp_path, capsys, role
+@pytest.mark.parametrize("pod_release", [None, "inference"])
+def test_application_log_preserves_context_on_console(
+    configure_logging, tmp_path, capsys, role, pod_release
 ):
-    handler = configure_logging(tmp_path, role)
-    assert configure_logging(tmp_path, role) is handler
+    handler = configure_logging(tmp_path, role, pod_release=pod_release)
+    assert configure_logging(tmp_path, role, pod_release=pod_release) is handler
     logger = logging.getLogger("test.application")
     logger.info("starting")
     if role == "worker":
@@ -83,10 +92,8 @@ def test_application_log_matches_console_and_preserves_context(
             },
         )
 
-    handler.close()
     console = capsys.readouterr().err
-    archive = tmp_path / "application" / f"{role}.jsonl"
-    assert archive.read_text() == console
+    assert not (tmp_path / "application").exists()
     start, failure = [json.loads(line) for line in console.splitlines()]
     assert start["service"] == f"gpustack.{role}"
     assert "worker_id" not in start
@@ -103,78 +110,3 @@ def test_application_log_matches_console_and_preserves_context(
         assert failure["worker_id"] == 42
         assert failure["worker_name"] == "qa-worker"
         assert failure["cluster_id"] == 7
-
-
-def test_application_archive_rotation_is_bounded(
-    configure_logging, tmp_path, monkeypatch
-):
-    monkeypatch.setattr(app_logging, "_APPLICATION_LOG_FILE_BYTES", 500)
-    handler = configure_logging(tmp_path)
-    for i in range(12):
-        logging.getLogger("test.application").info("%d %s", i, "用" * 40)
-
-    handler.close()
-
-    directory = tmp_path / "application"
-    assert {path.name for path in directory.iterdir()} == {
-        "server.jsonl",
-        "server.jsonl.1",
-        "server.jsonl.2",
-    }
-    assert all(path.stat().st_size <= 500 for path in directory.iterdir())
-
-
-def test_full_archive_queue_keeps_writing_console(
-    configure_logging, tmp_path, monkeypatch, capsys
-):
-    monkeypatch.setattr(app_logging, "_APPLICATION_LOG_QUEUE_BYTES", 256)
-    started = Event()
-    release = Event()
-    emit = app_logging._ApplicationLogFile.emit
-
-    def write_delayed(handler, record):
-        started.set()
-        if release.wait(timeout=3):
-            emit(handler, record)
-
-    monkeypatch.setattr(app_logging._ApplicationLogFile, "emit", write_delayed)
-    handler = configure_logging(tmp_path)
-
-    logger = logging.getLogger("test.application")
-    try:
-        logger.info("disk writing")
-        assert started.wait(timeout=2)
-        logger.info("queued")
-        logger.info("stays on console")
-        console = [
-            json.loads(line)["message"] for line in capsys.readouterr().err.splitlines()
-        ]
-        assert console == ["disk writing", "queued", "stays on console"]
-    finally:
-        release.set()
-    handler.close()
-
-    archive = (tmp_path / "application" / "server.jsonl").read_text()
-    assert [json.loads(line)["message"] for line in archive.splitlines()] == [
-        "disk writing",
-        "queued",
-    ]
-
-
-def test_archive_write_failure_does_not_disable_console(
-    configure_logging, tmp_path, monkeypatch, capsys
-):
-    def deny_archive(*args, **kwargs):
-        raise PermissionError("read-only directory")
-
-    monkeypatch.setattr(app_logging._ApplicationLogFile, "_open", deny_archive)
-    handler = configure_logging(tmp_path)
-
-    logging.getLogger("test.application").info("still serving")
-    handler.close()
-
-    messages = [
-        json.loads(line)["message"] for line in capsys.readouterr().err.splitlines()
-    ]
-    assert "still serving" in messages
-    assert not (Path(tmp_path) / "application" / "server.jsonl").exists()

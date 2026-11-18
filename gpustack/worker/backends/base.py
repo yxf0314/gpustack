@@ -89,6 +89,7 @@ from gpustack.utils import platform
 from gpustack.utils.version import pick_runtime_version
 from gpustack.utils.runtime import transform_workload_plan
 from gpustack.worker.pd_injection import PDInjection, render_pd_injection
+from gpustack.worker.log_export import pod_log_labels
 
 logger = logging.getLogger(__name__)
 
@@ -2157,6 +2158,14 @@ exec "$@"
             # Hand the operator InstanceType name to the runtime; the
             # runtime's Kubernetes deployer owns queue admission from here.
             workload.instance_type = selector.type
+        labels = pod_log_labels(
+            self._config,
+            self._model_instance,
+            self._worker.id,
+            role="router" if accelerator_free else None,
+        )
+        if labels:
+            workload.labels = {**(workload.labels or {}), **labels}
         return transform_workload_plan(self._config, workload, self._fallback_registry)
 
 

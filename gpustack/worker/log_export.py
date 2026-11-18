@@ -4,12 +4,13 @@ import shutil
 import threading
 from pathlib import Path
 from time import time_ns
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, Optional
 from uuid import uuid4
 
 from gpustack.worker.log_sources import sanitize_instance_name
 
 if TYPE_CHECKING:
+    from gpustack.config.config import Config
     from gpustack.schemas.models import ModelInstance
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,30 @@ ENGINE_LOG_EXPORT_DIR = "engine-export"
 _RETENTION_NS = 5_000_000_000
 _MAX_RETAINED_ARCHIVES = 32
 _MAX_RETAINED_BYTES = 256 * 1024 * 1024
+
+
+def pod_log_labels(
+    config: "Config",
+    instance: "ModelInstance",
+    worker_id: int,
+    role: Optional[str] = None,
+) -> Dict[str, str]:
+    """Label inference Pods for the Alloy instance in the same Helm release."""
+    release = getattr(config, "log_pod_release", None)
+    if not release:
+        return {}
+    return {
+        "gpustack.ai/log-release": release,
+        "gpustack.ai/log-source": "engine",
+        "gpustack.ai/cluster-id": str(instance.cluster_id or 0),
+        "gpustack.ai/model-id": str(instance.model_id),
+        "gpustack.ai/model-instance-id": str(instance.id),
+        "gpustack.ai/worker-id": str(worker_id),
+        "gpustack.ai/restart-count": str(instance.restart_count or 0),
+        "gpustack.ai/log-role": sanitize_instance_name(
+            role or instance.role or "engine"
+        ),
+    }
 
 
 class EngineLogExport:
