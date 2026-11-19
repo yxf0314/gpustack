@@ -369,6 +369,20 @@ imagePullSecrets:
 {{- end }}
 {{- end -}}
 
+{{- define "gpustack.tempoName" -}}
+{{- printf "%s-tempo" .Release.Name -}}
+{{- end -}}
+
+{{- define "gpustack.tracingEndpoint" -}}
+{{- if .Values.tracing.enabled -}}
+{{- if .Values.tracing.endpoint -}}
+{{- .Values.tracing.endpoint -}}
+{{- else if .Values.server.enabled -}}
+{{- printf "%s.%s.svc.%s:4317" (include "gpustack.tempoName" .) .Release.Namespace .Values.clusterDomain -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "gpustack.observabilityEnv" -}}
 {{- with .Values.logging.endpoint }}
 - name: GPUSTACK_LOG_OTLP_ENDPOINT
@@ -376,9 +390,14 @@ imagePullSecrets:
 - name: GPUSTACK_LOG_POD_RELEASE
   value: {{ $.Release.Name | quote }}
 {{- end }}
-{{- with .Values.tracing.endpoint }}
+{{- if not .Values.tracing.enabled }}
+- name: GPUSTACK_DISABLE_TRACING
+  value: "true"
+{{- else }}
+{{- with (include "gpustack.tracingEndpoint" .) }}
 - name: GPUSTACK_TRACE_OTLP_ENDPOINT
   value: {{ . | quote }}
+{{- end }}
 {{- end }}
 {{- end }}
 

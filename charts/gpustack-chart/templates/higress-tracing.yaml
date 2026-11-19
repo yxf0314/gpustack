@@ -1,11 +1,12 @@
-{{- if and .Values.server.enabled (index .Values "higress-core" "enabled") (index .Values "higress-core" "global" "enableIstioAPI") (or .Values.tracing.endpoint .Values.logging.endpoint) }}
+{{- $endpoint := include "gpustack.tracingEndpoint" . }}
+{{- if and .Values.server.enabled (index .Values "higress-core" "enabled") (index .Values "higress-core" "global" "enableIstioAPI") (or $endpoint .Values.logging.endpoint) }}
 {{- $gateway := index .Subcharts "higress-core" }}
 {{- $selector := include "gateway.selectorLabels" $gateway | fromYaml }}
 {{- if not $selector }}
 {{- fail "The bundled Higress gateway needs a workload selector for observability." }}
 {{- end }}
-{{- $port := last (splitList ":" .Values.tracing.endpoint) }}
-{{- $host := trimAll "[]" (trimSuffix (printf ":%s" $port) .Values.tracing.endpoint) }}
+{{- $port := last (splitList ":" $endpoint) }}
+{{- $host := trimAll "[]" (trimSuffix (printf ":%s" $port) $endpoint) }}
 apiVersion: networking.istio.io/v1alpha3
 kind: EnvoyFilter
 metadata:
@@ -18,7 +19,7 @@ spec:
     labels:
 {{ toYaml $selector | indent 6 }}
   configPatches:
-    {{- if .Values.tracing.endpoint }}
+    {{- if $endpoint }}
     - applyTo: CLUSTER
       match:
         context: GATEWAY
@@ -61,7 +62,7 @@ spec:
           name: envoy.filters.network.http_connection_manager
           typed_config:
             '@type': type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
-            {{- if .Values.tracing.endpoint }}
+            {{- if $endpoint }}
             tracing:
               random_sampling:
                 value: 100
@@ -89,7 +90,7 @@ spec:
                         key: x-gpustack-request-id
                         value: '%REQ(X-REQUEST-ID)%'
                       append_action: ADD_IF_ABSENT
-    {{- if .Values.tracing.endpoint }}
+    {{- if $endpoint }}
     - applyTo: HTTP_FILTER
       match:
         context: GATEWAY

@@ -58,7 +58,7 @@ def create_custom_workload(monkeypatch):
         backend._router_launch = resolve_router_launch(backend._model_spec, definition)
         backend._config = SimpleNamespace(
             log_otlp_endpoint="http://otel/v1/logs" if log_collection else None,
-            trace_otlp_endpoint=trace_endpoint,
+            effective_trace_otlp_endpoint=trace_endpoint,
         )
         backend._model_instance = SimpleNamespace(role=role)
         backend._get_configured_image = lambda: backend._model.image_name

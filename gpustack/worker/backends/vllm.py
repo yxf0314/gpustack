@@ -1617,9 +1617,10 @@ class VLLMServer(InferenceServer):
         self, image: str, user_args: List[str], env: Dict[str, str]
     ) -> List[str]:
         config = self._config
+        trace_endpoint = config.effective_trace_otlp_endpoint
         dependencies = self._resolved_image_dependencies or {}
         if (
-            not (config.log_otlp_endpoint or config.trace_otlp_endpoint)
+            not (config.log_otlp_endpoint or trace_endpoint)
             or dependencies.get("vllm") != "0.32.0"
             or image.rsplit("/", 1)[-1] != "runner:cuda13.0-vllm0.32.0"
             or env.get("PYPI_PACKAGES_INSTALL")
@@ -1649,12 +1650,12 @@ class VLLMServer(InferenceServer):
             # Keep prompt text and token IDs empty even at DEBUG.
             arguments.extend(["--enable-log-requests", "--max-log-len", "0"])
         if (
-            config.trace_otlp_endpoint
+            trace_endpoint
             and "--otlp-traces-endpoint" not in options
             and not env.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
             and env.get("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc") == "grpc"
         ):
-            arguments.extend(["--otlp-traces-endpoint", config.trace_otlp_endpoint])
+            arguments.extend(["--otlp-traces-endpoint", trace_endpoint])
         return arguments
 
     def _make_args_context(

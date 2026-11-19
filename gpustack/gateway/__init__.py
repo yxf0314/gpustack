@@ -807,7 +807,7 @@ async def ensure_bundled_gateway_log_context(
         if configure_higress_access_log_context(
             mesh,
             yaml.safe_load(defaults["data"]["mesh"]),
-            bool(cfg.trace_otlp_endpoint),
+            bool(cfg.effective_trace_otlp_endpoint),
         ):
             await client.patch_namespaced_config_map(
                 name="higress-config",

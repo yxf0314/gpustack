@@ -3,6 +3,7 @@ from pathlib import Path
 
 from starlette.requests import Request
 import pytest
+from pydantic import ValidationError
 
 from gpustack.cmd.prerun import prepare_observability_config
 from gpustack.config.config import Config
@@ -58,6 +59,57 @@ def test_no_prometheus_at_all_is_a_first_class_answer(tmp_path):
     cfg = Config(data_dir=str(tmp_path / "data"), disable_builtin_observability=True)
 
     assert cfg.get_prometheus_url() is None
+
+
+@pytest.mark.parametrize(
+    ("environment", "options", "expected"),
+    [
+        ("docker", {}, "[2001:db8::10]:4317"),
+        ("docker", {"enable_worker": True}, "[2001:db8::10]:4317"),
+        ("docker", {"trace_otlp_endpoint": "collector:4321"}, "collector:4321"),
+        (
+            "docker",
+            {"trace_otlp_endpoint": "collector:4321", "disable_tracing": True},
+            None,
+        ),
+        ("docker", {"server_url": "http://server"}, None),
+        ("kubernetes", {}, None),
+        (
+            "kubernetes",
+            {"trace_otlp_endpoint": "tempo.namespace:4317"},
+            "tempo.namespace:4317",
+        ),
+        ("host", {}, None),
+    ],
+)
+def test_effective_trace_endpoint(
+    tmp_path, monkeypatch, environment, options, expected
+):
+    monkeypatch.delenv("GPUSTACK_RUN_DIR", raising=False)
+    monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+    if environment in {"docker", "kubernetes"}:
+        monkeypatch.setenv("GPUSTACK_RUN_DIR", str(tmp_path / "run"))
+    if environment == "kubernetes":
+        monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "kube-api")
+    cfg = Config(
+        data_dir=str(tmp_path / "data"),
+        gateway_mode="disabled",
+        advertise_address="2001:db8::10",
+        token="registration-token",
+        **options,
+    )
+
+    assert cfg.effective_trace_otlp_endpoint == expected
+
+
+@pytest.mark.parametrize("field", ["trace_otlp_endpoint", "trace_advertise_endpoint"])
+@pytest.mark.parametrize(
+    "value",
+    ['a$(command):4317', 'https://collector:4317', '[1:1]:4317', 'collector:65536'],
+)
+def test_trace_endpoint_validation(tmp_path, field, value):
+    with pytest.raises(ValidationError, match=field):
+        Config(data_dir=str(tmp_path / "data"), **{field: value})
 
 
 def test_incluster_gateway_scrape_job_uses_pod_discovery(tmp_path, monkeypatch):

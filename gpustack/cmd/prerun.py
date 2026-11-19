@@ -41,6 +41,7 @@ from gpustack.utils.s6_services import (
     migration_services,
     observability_services,
     log_collection_services,
+    trace_storage_services,
     all_services,
     gpustack_service_name,
 )
@@ -79,7 +80,9 @@ def run(args: argparse.Namespace):
         )
         s6_base_path = args.s6_base_path or "/etc/s6-overlay/s6-rc.d"
         enabled_services = determine_enabled_services(
-            cfg, logs_active=prepare_log_collection(cfg)
+            cfg,
+            logs_active=prepare_log_collection(cfg),
+            tempo_active=prepare_builtin_tempo(cfg),
         )
         # migrate hardcode postgres data dir if needed for determining dependency services
         migrate_hardcode_postgres_data_and_password(cfg, enabled_services)
@@ -265,7 +268,7 @@ def prepare_gateway_config(cfg: Config):
     if cfg.gateway_mode == GatewayModeEnum.embedded:
         _prepare_higress_observability(
             higress_embedded_kubeconfig.parent / "apiserver",
-            cfg.trace_otlp_endpoint,
+            cfg.effective_trace_otlp_endpoint,
             log_enabled=bool(cfg.log_otlp_endpoint),
         )
         with open(config_path, "w") as f:
@@ -481,6 +484,57 @@ def prepare_log_collection(cfg: Config) -> bool:
     return True
 
 
+def prepare_builtin_tempo(cfg: Config) -> bool:
+    """Write the configuration consumed by the Docker Tempo service."""
+    if not cfg.use_builtin_tempo():
+        return False
+
+    path = Path(os.environ["GPUSTACK_RUN_DIR"]) / "tempo" / "config.yaml"
+    data = Path(cfg.data_dir) / "tempo"
+    loopback = "127.0.0.1"
+    try:
+        _write_yaml_atomically(
+            path,
+            {
+                "target": "all",
+                "server": {
+                    "http_listen_address": loopback,
+                    "http_listen_port": cfg.builtin_tempo_http_port,
+                    "grpc_listen_address": loopback,
+                },
+                "distributor": {
+                    "receivers": {
+                        "otlp": {
+                            "protocols": {
+                                "grpc": {
+                                    "endpoint": f"0.0.0.0:{cfg.builtin_tempo_otlp_port}"
+                                },
+                            },
+                        },
+                    },
+                },
+                "ingester": {
+                    "lifecycler": {"address": loopback},
+                    "flush_all_on_shutdown": True,
+                },
+                "memberlist": {"bind_addr": [loopback], "bind_port": 0},
+                "storage": {
+                    "trace": {
+                        "backend": "local",
+                        "wal": {"path": str(data / "wal")},
+                        "local": {"path": str(data / "blocks")},
+                    },
+                },
+                "compactor": {"compaction": {"block_retention": "24h"}},
+                "usage_report": {"reporting_enabled": False},
+            },
+        )
+    except OSError as exc:
+        logger.warning("Unable to configure embedded Tempo: %s", exc)
+        return False
+    return True
+
+
 def prepare_observability_config(cfg: Config):
     env_config_path = prepare_env("GPUSTACK_OBSERVABILITY_CONFIG", "observability")
     with open(env_config_path, "w") as f:
@@ -611,7 +665,9 @@ datasources:
     )
 
 
-def determine_enabled_services(cfg: Config, logs_active: bool = False) -> List[str]:
+def determine_enabled_services(
+    cfg: Config, logs_active: bool = False, tempo_active: bool = False
+) -> List[str]:
     services = []
     # embedded database
     if cfg.database_url is None and cfg.server_role() in [
@@ -629,6 +685,8 @@ def determine_enabled_services(cfg: Config, logs_active: bool = False) -> List[s
         services.extend(observability_services.all_services())
     if logs_active:
         services.extend(log_collection_services.all_services())
+    if tempo_active:
+        services.extend(trace_storage_services.all_services())
 
     return services
 

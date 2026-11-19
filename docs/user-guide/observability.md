@@ -105,16 +105,15 @@ If you already have an external Prometheus/Grafana stack, you can configure it m
 
 ## Inference Logs and Traces
 
-Inference responses include an `X-GPUStack-Request-Id` header. Use that ID to look up request logs and traces in your telemetry backend. Log export and tracing have independent settings. Set either endpoint to an empty value to disable that signal.
+Inference responses include an `X-GPUStack-Request-Id` header. Use that ID to look up request logs and traces. Docker servers and Helm server releases enable tracing by default and store spans in a built-in Tempo instance. The default trace retention is 24 hours. Log export is independent and requires a log endpoint.
 
-| Log endpoint | Trace endpoint | Available telemetry |
+| Trace destination | Docker | Helm |
 | --- | --- | --- |
-| Empty | Empty | Local text logs |
-| Set | Empty | Exported logs and local application logs in JSON |
-| Empty | Set | Exported traces and local text logs |
-| Set | Set | Exported logs and traces that can be correlated by trace ID |
+| Built-in Tempo | Default on the Server | Default in a release with the Server enabled |
+| External OTLP/gRPC receiver | Set `GPUSTACK_TRACE_OTLP_ENDPOINT` | Set `tracing.endpoint` |
+| Disabled | Set `GPUSTACK_DISABLE_TRACING=true` | Set `tracing.enabled=false` |
 
-Use OTLP endpoints provided by your telemetry infrastructure. The log endpoint must be reachable from the GPUStack containers that export logs. The trace endpoint must be reachable from the Server, Workers, gateways, and inference containers that export traces. The tracing connection uses plaintext gRPC, so use an address on a trusted network.
+Each tracing component sends spans directly to the selected receiver. The log endpoint must be reachable from the GPUStack containers that export logs. The trace endpoint must be reachable from the Server, Workers, gateways, and inference containers that export traces. The tracing connection uses plaintext gRPC, so use an address on a trusted network. Switching to an external receiver or disabling tracing stops the built-in instance. Its data remains on disk.
 
 ### Configure Docker
 
@@ -126,6 +125,8 @@ GPUSTACK_TRACE_OTLP_ENDPOINT='<collector-host>:4317'
 ```
 
 Pass them with `docker run -e` or under `environment` in your Compose file. The log endpoint is the full OTLP/HTTP URL. The trace endpoint is an OTLP/gRPC `host:port` without a URL scheme.
+
+The built-in Tempo runs in the Server container. It stores data in the `tempo` directory under the GPUStack data directory. Independent Workers receive `GPUSTACK_TRACE_OTLP_ENDPOINT` in the platform-generated registration command. For remote Workers to use the built-in receiver, make its OTLP port (4317 by default) reachable from their trusted network. Set `GPUSTACK_TRACE_ADVERTISE_ENDPOINT` on the Server if those Workers use a different hostname or published port. Tempo's query port is bound to loopback inside the Server container.
 
 GPUStack starts Alloy inside each container configured for log export. Alloy reads Server and Worker output through the Docker Logs API. Provide access to the local Docker daemon, typically with `--volume /var/run/docker.sock:/var/run/docker.sock`. Docker Workers already use this mount. The container's logging driver must support reading logs through `docker logs` and controls retention. Alloy also reads the embedded Higress access log and existing engine archives from disk.
 
@@ -145,6 +146,8 @@ tracing:
 Use a namespace-qualified Service DNS name for a Collector in another namespace. With an HTTPS log endpoint, `logging.authorizationSecret` and `logging.caSecret` take a `name` and a `key` from existing Secrets in the release namespace. Their default keys are `authorization` and `ca.crt`.
 
 Setting `logging.endpoint` deploys one Alloy instance per Helm release. Alloy reads the release's GPUStack Pod logs using the Kubernetes API. If an existing agent collects the bundled Higress gateway's stdout, set `logging.higress.enabled=false` to leave those logs with that agent.
+
+The built-in Tempo uses an internal Service and a dedicated PersistentVolumeClaim. Worker-only releases can use the Server's receiver by setting `tracing.endpoint`. Platform-generated Worker manifests include that endpoint when tracing is enabled on the Server. Set `tracing.advertiseEndpoint` on the Server release to advertise a separately reachable address to Workers outside that Kubernetes network.
 
 The bundled gateway's default access log format includes `request_id` and includes `traceparent` when tracing is enabled. If you manage Higress separately, configure tracing in that gateway and propagate W3C `traceparent` to the inference backends.
 

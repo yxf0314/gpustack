@@ -355,6 +355,12 @@ def start_cmd_options(parser_server: argparse.ArgumentParser):
     )
 
     # Observability settings
+    common_group.add_argument(
+        "--disable-tracing",
+        action=OptionalBoolAction,
+        help="Disable GPUStack-managed trace export and embedded Tempo.",
+        default=get_gpustack_env_bool("DISABLE_TRACING"),
+    )
     server_group.add_argument(
         "--disable-builtin-observability",
         action=OptionalBoolAction,
@@ -946,6 +952,7 @@ def set_common_options(args, config_data: dict):
         "trusted_proxy_cidrs",
         "service_discovery_name",
         "namespace",
+        "disable_tracing",
     ]
 
     for option in options:

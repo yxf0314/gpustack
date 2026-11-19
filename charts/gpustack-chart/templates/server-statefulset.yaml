@@ -95,6 +95,10 @@ spec:
             {{- with (include "gpustack.observabilityEnv" . | trim) }}
             {{- . | nindent 12 }}
             {{- end }}
+            {{- if and .Values.tracing.enabled .Values.tracing.advertiseEndpoint }}
+            - name: GPUSTACK_TRACE_ADVERTISE_ENDPOINT
+              value: {{ .Values.tracing.advertiseEndpoint | quote }}
+            {{- end }}
           envFrom:
             {{- if .Values.worker.enabled }}
             - secretRef:

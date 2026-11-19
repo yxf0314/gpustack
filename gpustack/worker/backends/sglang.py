@@ -727,9 +727,10 @@ class SGLangServer(InferenceServer):
     ) -> List[str]:
         """Build engine arguments and enable the request ID header in native logs."""
         config = self._config
+        trace_endpoint = config.effective_trace_otlp_endpoint
         dependencies = self._resolved_image_dependencies or {}
         if (
-            not (config.log_otlp_endpoint or config.trace_otlp_endpoint)
+            not (config.log_otlp_endpoint or trace_endpoint)
             or dependencies.get("sglang") != "0.5.22"
             or image.rsplit("/", 1)[-1] != "runner:cuda13.0-sglang0.5.22"
             or env.get("PYPI_PACKAGES_INSTALL")
@@ -765,7 +766,7 @@ class SGLangServer(InferenceServer):
                 ]
             )
         if (
-            config.trace_otlp_endpoint
+            trace_endpoint
             and options.isdisjoint(("--enable-trace", "--otlp-traces-endpoint"))
             and not env.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
             and env.get("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc") == "grpc"
@@ -773,7 +774,7 @@ class SGLangServer(InferenceServer):
             # Keep the major stages while omitting per-step decode spans.
             env.setdefault("SGLANG_TRACE_LEVEL", "1")
             arguments.extend(
-                ["--enable-trace", "--otlp-traces-endpoint", config.trace_otlp_endpoint]
+                ["--enable-trace", "--otlp-traces-endpoint", trace_endpoint]
             )
         return arguments
 

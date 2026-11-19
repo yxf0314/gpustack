@@ -40,6 +40,49 @@ def test_prepare_s6_overlay_cleans_dependency_only_services(tmp_path):
     assert not (user_contents / "gpustack-migration").exists()
 
 
+def test_builtin_tempo_config_and_service(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    monkeypatch.setenv("GPUSTACK_RUN_DIR", str(run_dir))
+    monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+    cfg = Config(
+        data_dir=str(tmp_path / "data"),
+        gateway_mode="disabled",
+        disable_builtin_observability=True,
+        builtin_tempo_otlp_port=13417,
+        builtin_tempo_http_port=13200,
+    )
+    s6_base = tmp_path / "s6-rc.d"
+    service = s6_base / "user" / "contents.d" / "tempo"
+    active = prerun.prepare_builtin_tempo(cfg)
+    services = prerun.determine_enabled_services(cfg, tempo_active=active)
+    prepare_s6_overlay(services, [], s6_base)
+
+    config = yaml.safe_load((run_dir / "tempo" / "config.yaml").read_text())
+    assert service.exists()
+    assert "tempo" not in prerun.determine_dependency_services(cfg)
+    assert "grafana" not in services
+    assert config["server"] == {
+        "http_listen_address": "127.0.0.1",
+        "http_listen_port": 13200,
+        "grpc_listen_address": "127.0.0.1",
+    }
+    receiver = config["distributor"]["receivers"]["otlp"]["protocols"]
+    assert receiver == {"grpc": {"endpoint": "0.0.0.0:13417"}}
+    assert config["storage"]["trace"] == {
+        "backend": "local",
+        "wal": {"path": str(tmp_path / "data" / "tempo" / "wal")},
+        "local": {"path": str(tmp_path / "data" / "tempo" / "blocks")},
+    }
+    assert config["compactor"]["compaction"]["block_retention"] == "24h"
+    assert config["ingester"]["flush_all_on_shutdown"] is True
+
+    external = cfg.model_copy(update={"trace_otlp_endpoint": "collector:4317"})
+    active = prerun.prepare_builtin_tempo(external)
+    services = prerun.determine_enabled_services(external, tempo_active=active)
+    prepare_s6_overlay(services, [], s6_base)
+    assert not service.exists()
+
+
 def _one_gpustack_port(monkeypatch):
     monkeypatch.setattr(prerun, "ports_for_services", lambda cfg: {50000: "gpustack"})
 
@@ -160,6 +203,7 @@ def embedded_gateway(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(prerun, "HIGRESS_DEFAULT_CONFIG", templates)
     monkeypatch.setenv("GPUSTACK_RUN_DIR", str(tmp_path / "run"))
+    monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
     cfg = Config(data_dir=str(tmp_path / "data"), gateway_mode="embedded")
     return cfg, Path(cfg.higress_base_dir()) / "apiserver", templates
 
@@ -218,7 +262,7 @@ def test_embedded_otel_filter_address_and_request_id(
 
 def test_disabled_tracing_leaves_fresh_higress_data_alone(embedded_gateway):
     cfg, apiserver, _ = embedded_gateway
-    prerun.prepare_gateway_config(cfg)
+    prerun.prepare_gateway_config(cfg.model_copy(update={"disable_tracing": True}))
     assert not apiserver.exists()
 
 
@@ -229,7 +273,7 @@ def test_embedded_logs_only_keeps_request_id_after_disabling_tracing(embedded_ga
         logs.model_copy(update={"trace_otlp_endpoint": "collector:4317"})
     )
 
-    prerun.prepare_gateway_config(logs)
+    prerun.prepare_gateway_config(logs.model_copy(update={"disable_tracing": True}))
     config = yaml.safe_load((apiserver / HIGRESS_FILTER_PATH).read_text())
     manager_patch, route_patch = config["spec"]["configPatches"]
     manager = manager_patch["patch"]["value"]["typed_config"]
@@ -252,7 +296,7 @@ def test_disabling_tracing_removes_filter_even_without_configmap(embedded_gatewa
     filter_path.parent.mkdir(parents=True)
     filter_path.write_text("stale generated resource")
 
-    prerun.prepare_gateway_config(cfg)
+    prerun.prepare_gateway_config(cfg.model_copy(update={"disable_tracing": True}))
 
     assert not filter_path.exists()
     assert not (apiserver / HIGRESS_CONFIGMAP_PATH).exists()
@@ -275,7 +319,7 @@ def test_embedded_tracing_preserves_operator_access_log_format(embedded_gateway)
     assert (apiserver / HIGRESS_FILTER_PATH).exists()
     assert configmap_path.read_text() == current_config
 
-    prerun.prepare_gateway_config(cfg)
+    prerun.prepare_gateway_config(cfg.model_copy(update={"disable_tracing": True}))
     assert not (apiserver / HIGRESS_FILTER_PATH).exists()
     assert configmap_path.read_text() == current_config
 
@@ -304,10 +348,25 @@ def test_embedded_gateway_reconfigures_tracing_without_replacing_existing_settin
     assert updated_mesh["accessLogEncoding"] == "JSON"
     assert "%REQ(TRACEPARENT):55%" in updated_mesh["accessLogFormat"]
 
-    prerun.prepare_gateway_config(cfg)
+    prerun.prepare_gateway_config(cfg.model_copy(update={"disable_tracing": True}))
     assert not envoy_path.exists()
     restored = yaml.safe_load(cm_path.read_text())
     assert yaml.safe_load(restored["data"]["mesh"]) == mesh
+
+
+def test_embedded_gateway_defaults_to_builtin_tempo(embedded_gateway):
+    cfg, root, _ = embedded_gateway
+    cfg = cfg.model_copy(update={"advertise_address": "192.0.2.10"})
+
+    prerun.prepare_gateway_config(cfg)
+
+    config = yaml.safe_load((root / HIGRESS_FILTER_PATH).read_text())
+    cluster = config["spec"]["configPatches"][0]["patch"]["value"]
+    endpoints = cluster["load_assignment"]["endpoints"][0]["lb_endpoints"]
+    assert endpoints[0]["endpoint"]["address"]["socket_address"] == {
+        "address": "192.0.2.10",
+        "port_value": 4317,
+    }
 
 
 def test_disabled_collector_removes_stale_config_and_service(tmp_path, collector_path):

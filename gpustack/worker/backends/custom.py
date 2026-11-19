@@ -215,7 +215,7 @@ class CustomServer(InferenceServer):
             and source_model.disaggregation.mode.value == "vllm-nixl"
         ):
             command_args = _vllm_router_trace_command(
-                image, command_args, env, self._config.trace_otlp_endpoint
+                image, command_args, env, self._config.effective_trace_otlp_endpoint
             )
         if managed_router and not backend_command and image_overridden and not command:
             if not command_args:

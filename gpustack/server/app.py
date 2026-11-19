@@ -48,7 +48,8 @@ def create_app(cfg: Config) -> FastAPI:
         app.state.http_client_no_proxy = aiohttp.ClientSession(connector=connector)
         try:
             async with inference_tracing(
-                cfg.trace_otlp_endpoint if native_inference else None, "server"
+                cfg.effective_trace_otlp_endpoint if native_inference else None,
+                "server",
             ) as tracer:
                 app.state.inference_tracer = tracer
                 yield

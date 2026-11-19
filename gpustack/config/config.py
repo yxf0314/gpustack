@@ -1,6 +1,7 @@
 import ipaddress
 import logging
 import os
+import re
 import secrets
 import socket
 import uuid
@@ -22,6 +23,7 @@ from pydantic import (
     ConfigDict,
     Field,
     SecretStr,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -218,6 +220,9 @@ class Config(WorkerConfig, BaseSettings):
                              entry the gateway appended is trusted, so forwarded headers cannot spoof
                              the source address.
         disable_builtin_observability: Disable embedded Grafana and Prometheus services.
+        disable_tracing: Disable GPUStack-managed trace export and embedded Tempo.
+        trace_otlp_endpoint: OTLP/gRPC host:port for exporting traces to an external receiver.
+        trace_advertise_endpoint: OTLP/gRPC host:port to include in Worker registration when the default address is unreachable from Workers.
         prometheus_url: Base URL of an external Prometheus to query. When unset, the embedded one is used if it is enabled. Set this to keep the server's own metric queries working on a deployment that delegates observability to its own stack.
         grafana_url: Base URL for Grafana UI used by redirects and proxying. When unset, defaults to the embedded Grafana URL unless builtin observability is disabled.
         grafana_worker_dashboard_uid: Grafana dashboard UID for worker dashboard.
@@ -379,7 +384,11 @@ class Config(WorkerConfig, BaseSettings):
     log_otlp_authorization: Optional[SecretStr] = Field(default=None, repr=False)
     log_otlp_ca_file: Optional[str] = None
     log_pod_release: Optional[str] = None
+    disable_tracing: bool = False
     trace_otlp_endpoint: Optional[str] = None
+    trace_advertise_endpoint: Optional[str] = None
+    builtin_tempo_otlp_port: int = Field(default=4317, gt=0, le=65535)
+    builtin_tempo_http_port: int = Field(default=3200, gt=0, le=65535)
     builtin_prometheus_port: int = 19090
     prometheus_url: Optional[str] = None
     builtin_grafana_port: int = 13000
@@ -525,27 +534,23 @@ class Config(WorkerConfig, BaseSettings):
             self.jwt_secret_key.encode(), b"gateway-auth-cache", hashlib.sha256
         ).hexdigest()
 
-    @field_validator("trace_otlp_endpoint")
+    @field_validator("trace_otlp_endpoint", "trace_advertise_endpoint")
     @classmethod
-    def _validate_trace_otlp_endpoint(cls, value: Optional[str]) -> Optional[str]:
+    def _validate_trace_otlp_endpoint(
+        cls, value: Optional[str], info: ValidationInfo
+    ) -> Optional[str]:
         value = (value or "").strip()
         if not value:
             return None
 
-        try:
-            endpoint = urlparse(f"//{value}")
-            if (
-                endpoint.netloc == value
-                and endpoint.hostname
-                and endpoint.port
-                and endpoint.username is None
-                and not any(char.isspace() for char in value)
-            ):
-                return value
-        except ValueError:
-            pass
+        if re.fullmatch(r"(?:[A-Za-z0-9_.-]+|\[[0-9A-Fa-f:.]+\]):[0-9]{1,5}", value):
+            try:
+                if urlparse(f"//{value}").port:
+                    return value
+            except ValueError:
+                pass
 
-        raise ValueError("trace_otlp_endpoint must be an OTLP/gRPC host:port address")
+        raise ValueError(f"{info.field_name} must be an OTLP/gRPC host:port address")
 
     @field_validator("trusted_proxy_cidrs")
     @classmethod
@@ -1071,6 +1076,28 @@ class Config(WorkerConfig, BaseSettings):
             return self.ServerRole.BOTH
         else:
             return self.ServerRole.SERVER
+
+    def use_builtin_tempo(self) -> bool:
+        """Return whether the Docker entrypoint should start its local Tempo."""
+        return (
+            bool(os.getenv("GPUSTACK_RUN_DIR"))
+            and "KUBERNETES_SERVICE_HOST" not in os.environ
+            and not self._is_worker()
+            and not self.disable_tracing
+            and not self.trace_otlp_endpoint
+        )
+
+    @property
+    def effective_trace_otlp_endpoint(self) -> Optional[str]:
+        """Resolve the receiver for span producers in this deployment."""
+        if self.disable_tracing:
+            return None
+        if self.use_builtin_tempo():
+            host = self.get_advertise_address()
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            return f"{host}:{self.builtin_tempo_otlp_port}"
+        return self.trace_otlp_endpoint
 
     def _is_both_role(self) -> bool:
         """

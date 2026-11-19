@@ -101,9 +101,18 @@ logging:
     name: ""
     key: ca.crt
 tracing:
-  # OTLP/gRPC host:port reachable from every participating pod. A Service in
-  # another namespace should use its namespace-qualified DNS name.
+  enabled: true
+  # External OTLP/gRPC host:port. Leave empty to use Tempo in a server release.
+  # A worker-only release needs a supplied endpoint to export traces.
   endpoint: ""
+  # Optional OTLP/gRPC address handed out by the server in Worker registration
+  # commands. Set this when the ingest endpoint uses DNS local to the cluster.
+  advertiseEndpoint: ""
+  tempo:
+    retention: 24h
+    storageSize: 10Gi
+    # null selects the cluster's default StorageClass.
+    storageClassName: null
 server:
   # Deploy the GPUStack server (control plane) from this release.
   #

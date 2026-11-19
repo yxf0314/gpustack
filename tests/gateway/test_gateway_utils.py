@@ -94,7 +94,7 @@ async def test_bundled_gateway_log_context(
     monkeypatch.setattr("gpustack.gateway.k8s_client.CoreV1Api", lambda **_: client)
     cfg = SimpleNamespace(
         gateway_namespace="inference",
-        trace_otlp_endpoint="collector:4317" if enabled else None,
+        effective_trace_otlp_endpoint="collector:4317" if enabled else None,
     )
 
     await ensure_bundled_gateway_log_context(cfg, api_client=None)

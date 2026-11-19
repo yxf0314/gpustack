@@ -89,6 +89,7 @@ observability_services = S6Services(
     support_pipeline=True,
 )
 log_collection_services = S6Services(S6Service("alloy"))
+trace_storage_services = S6Services(S6Service("tempo"))
 
 
 def all_services() -> List[str]:
@@ -98,6 +99,7 @@ def all_services() -> List[str]:
         *migration_services.all_services(),
         *observability_services.all_services(),
         *log_collection_services.all_services(),
+        *trace_storage_services.all_services(),
     ]
 
 

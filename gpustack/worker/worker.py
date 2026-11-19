@@ -381,7 +381,7 @@ class Worker:
             app.state.http_client_no_proxy = aiohttp.ClientSession(connector=connector)
             try:
                 async with inference_tracing(
-                    self._config.trace_otlp_endpoint, "worker"
+                    self._config.effective_trace_otlp_endpoint, "worker"
                 ) as tracer:
                     app.state.inference_tracer = tracer
                     yield
@@ -412,7 +412,7 @@ class Worker:
             self._serve_manager.record_successful_inference
         )
         app.add_middleware(BaseHTTPMiddleware, dispatch=proxy.set_port_from_model_name)
-        if self._config.trace_otlp_endpoint:
+        if self._config.effective_trace_otlp_endpoint:
             app.add_middleware(proxy.WorkerProxyTracingMiddleware)
         app.include_router(
             route_config.router,
