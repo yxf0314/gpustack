@@ -323,7 +323,7 @@ def _write_text_atomically(path: Path, content: str) -> None:
 
 
 def _set_higress_access_log_context(
-    configmap_path: Path, template: dict, enabled: bool
+    configmap_path: Path, template: dict, *, trace_enabled: bool, log_enabled: bool
 ) -> None:
     defaults = yaml.safe_load(template["data"]["mesh"])
     configmap = (
@@ -332,11 +332,26 @@ def _set_higress_access_log_context(
         else template
     )
     mesh = yaml.safe_load(configmap["data"]["mesh"])
-    if not configure_higress_access_log_context(mesh, defaults, enabled):
-        return
+    if configure_higress_access_log_context(mesh, defaults, trace_enabled):
+        configmap["data"]["mesh"] = yaml.safe_dump(mesh, sort_keys=False)
+        _write_yaml_atomically(configmap_path, configmap)
+    if log_enabled and not _supports_higress_log_collection(mesh):
+        logger.warning(
+            "Higress access-log export requires JSON records with string "
+            "path and request_id fields. Update mesh.accessLogFormat."
+        )
 
-    configmap["data"]["mesh"] = yaml.safe_dump(mesh, sort_keys=False)
-    _write_yaml_atomically(configmap_path, configmap)
+
+def _supports_higress_log_collection(mesh: dict) -> bool:
+    if not isinstance(mesh, dict):
+        return False
+    try:
+        fields = json.loads(mesh.get("accessLogFormat", ""))
+    except (TypeError, ValueError, RecursionError):
+        return False
+    return isinstance(fields, dict) and all(
+        isinstance(fields.get(field), str) for field in ("path", "request_id")
+    )
 
 
 def _prepare_higress_observability(
@@ -359,7 +374,9 @@ def _prepare_higress_observability(
         _write_yaml_atomically(
             filter_path, resource.model_dump(mode="json", exclude_none=True)
         )
-    _set_higress_access_log_context(configmap_path, template, bool(endpoint))
+    _set_higress_access_log_context(
+        configmap_path, template, trace_enabled=bool(endpoint), log_enabled=log_enabled
+    )
 
 
 def _log_export_options(cfg: Config) -> dict:

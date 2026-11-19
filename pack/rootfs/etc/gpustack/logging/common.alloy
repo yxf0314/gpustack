@@ -129,6 +129,18 @@ declare "logs" {
     }
 
     output {
+      logs = [otelcol.processor.filter.higress_format.input]
+    }
+  }
+
+  otelcol.processor.filter "higress_format" {
+    error_mode = "ignore"
+
+    log_conditions {
+      conditions = [`not IsString(log.attributes["path"])`]
+    }
+
+    output {
       logs = [otelcol.processor.filter.higress.input]
     }
   }
@@ -139,7 +151,6 @@ declare "logs" {
     log_conditions {
       context = "log"
       conditions = [
-        `not IsString(log.attributes["path"])`,
         `IsMatch(log.attributes["path"], "^/(healthz|livez|readyz|metrics)([/?]|$)")`,
       ]
     }

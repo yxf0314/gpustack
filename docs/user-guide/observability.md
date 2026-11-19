@@ -153,7 +153,9 @@ Setting `logging.endpoint` deploys one Alloy instance per Helm release. Alloy re
 
 The built-in Tempo uses an internal Service and a dedicated PersistentVolumeClaim. Worker-only releases can use the Server's receiver by setting `tracing.endpoint`. Platform-generated Worker manifests include that endpoint when tracing is enabled on the Server. Set `tracing.advertiseEndpoint` on the Server release to advertise a separately reachable address to Workers outside that Kubernetes network.
 
-The bundled gateway's default access log format includes `request_id` and includes `traceparent` when tracing is enabled. If you manage Higress separately, configure tracing in that gateway and propagate W3C `traceparent` to the inference backends.
+The bundled gateway's default access log format includes `request_id` and can include `traceparent` when tracing is enabled. For managed log collection, a custom Higress access log format must emit one JSON object per line with top-level string fields `path` and `request_id`. Alloy filters health endpoints using `path` and uses `request_id` to link records to inference requests. Records without a string `path` are counted as dropped by Alloy's `higress_format` filter. To retain a different format on Helm, set `logging.higress.enabled=false` to handle gateway logs with your own collector.
+
+If you manage Higress separately, configure tracing in that gateway and propagate W3C `traceparent` to the inference backends.
 
 !!! note
 

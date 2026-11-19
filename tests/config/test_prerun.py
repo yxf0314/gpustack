@@ -339,6 +339,35 @@ def test_embedded_tracing_preserves_operator_access_log_format(embedded_gateway)
     assert configmap_path.read_text() == current_config
 
 
+@pytest.mark.parametrize(
+    ("access_log_format", "valid"),
+    [
+        ('{"path":"%REQ(:PATH)%","request_id":"%REQ(X-REQUEST-ID)%"}', True),
+        ('{"path":"%REQ(:PATH)%"}', False),
+        ("%REQ(:PATH)% %REQ(X-REQUEST-ID)%", False),
+    ],
+)
+def test_embedded_log_collection_reports_incompatible_format(
+    embedded_gateway, caplog, access_log_format, valid
+):
+    cfg, apiserver, templates = embedded_gateway
+    configmap_path = apiserver / HIGRESS_CONFIGMAP_PATH
+    configmap_path.parent.mkdir(parents=True)
+    configmap = yaml.safe_load((templates / HIGRESS_CONFIGMAP_PATH).read_text())
+    mesh = yaml.safe_load(configmap["data"]["mesh"])
+    mesh["accessLogFormat"] = access_log_format
+    configmap["data"]["mesh"] = yaml.safe_dump(mesh)
+    contents = yaml.safe_dump(configmap)
+    configmap_path.write_text(contents)
+
+    prerun.prepare_gateway_config(
+        cfg.model_copy(update={"log_otlp_endpoint": "http://collector/v1/logs"})
+    )
+
+    assert configmap_path.read_text() == contents
+    assert ("Higress access-log export requires JSON" in caplog.text) is not valid
+
+
 def test_embedded_gateway_reconfigures_tracing_without_replacing_existing_settings(
     embedded_gateway,
 ):

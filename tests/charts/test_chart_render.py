@@ -425,7 +425,8 @@ def test_existing_gateway_agent_can_disable_only_gateway_collection():
 def test_bundled_higress_tracing_preserves_custom_stdout_format():
     docs = render(
         "--set",
-        "tracing.endpoint=otel:4317,logging.endpoint=http://otel:4318/v1/logs",
+        "tracing.endpoint=otel:4317,logging.endpoint=http://otel:4318/v1/logs,"
+        "logging.higress.enabled=false",
         "--set-string",
         "higress-core.meshConfig.accessLogFormat=%REQ(:METHOD)%",
     )
@@ -435,6 +436,35 @@ def test_bundled_higress_tracing_preserves_custom_stdout_format():
     mesh = yaml.safe_load(higress_config["data"]["mesh"])
     assert mesh["accessLogFormat"] == "%REQ(:METHOD)%"
     assert mesh["accessLogEncoding"] == "TEXT"
+
+
+@pytest.mark.parametrize(
+    "access_log_format",
+    ["%REQ(:PATH)%", '{"path":"%REQ(:PATH)%"}', '{"path":1,"request_id":"id"}'],
+)
+def test_bundled_higress_log_collection_rejects_incompatible_format(access_log_format):
+    error = render_error(
+        "--set",
+        "logging.endpoint=http://otel:4318/v1/logs",
+        "--set-literal",
+        f"higress-core.meshConfig.accessLogFormat={access_log_format}",
+    )
+    assert "JSON with string path and request_id fields" in error
+
+
+def test_bundled_higress_log_collection_accepts_custom_json_format():
+    access_log_format = '{"path":"%REQ(:PATH)%","request_id":"%REQ(X-REQUEST-ID)%"}'
+    docs = render(
+        "--set",
+        "logging.endpoint=http://otel:4318/v1/logs",
+        "--set-literal",
+        f"higress-core.meshConfig.accessLogFormat={access_log_format}",
+    )
+    configmap = next(doc for doc in docs if doc["metadata"]["name"] == "higress-config")
+    assert (
+        yaml.safe_load(configmap["data"]["mesh"])["accessLogFormat"]
+        == access_log_format
+    )
 
 
 @pytest.mark.parametrize(
