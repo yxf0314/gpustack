@@ -505,3 +505,19 @@ def test_vllm_pd_logs_keep_native_engine_and_coordinator_ids(collector_path):
         and match.groupdict() == {"pd_coordinator_id": coordinator}
         for pattern in patterns
     )
+
+
+@pytest.mark.parametrize("bootstrap_room", [0, 6_721_395_813_317_762_539, None])
+def test_sglang_pd_attempt_id_preserves_bootstrap_room(collector_path, bootstrap_room):
+    pipeline = prerun.ALLOY_LOG_TEMPLATE.with_name("common.alloy").read_text()
+    pattern, replacement = re.search(
+        r'replace_pattern\(log\.cache\["engine_json"\], '
+        r'("(?:[^"\\]|\\.)*"), ("(?:[^"\\]|\\.)*")\)',
+        pipeline,
+    ).groups()
+    replacement = re.sub(r"\$(\d+)", r"\\g<\1>", json.loads(replacement))
+    record = {"obj": {"bootstrap_room": bootstrap_room, "other_field": 1}}
+    parsed = json.loads(re.sub(json.loads(pattern), replacement, json.dumps(record)))
+
+    expected = str(bootstrap_room) if bootstrap_room is not None else None
+    assert parsed["obj"] == {"bootstrap_room": expected, "other_field": 1}
