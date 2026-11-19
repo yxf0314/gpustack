@@ -141,7 +141,7 @@ def ports_for_services(cfg: Config) -> Dict[int, str]:
     if not gateway_disabled:
         ports[cfg.api_port] = gpustack_service_name
 
-    if cfg.use_builtin_tempo():
+    if cfg.use_builtin_tempo() or _is_helm_tempo_pod(cfg):
         trace_storage_services.set_ports(cfg, ports)
 
     return ports
@@ -508,13 +508,20 @@ def prepare_log_collection(cfg: Config) -> bool:
     return True
 
 
+def _is_helm_tempo_pod(cfg: Config) -> bool:
+    pod = os.getenv("GPUSTACK_BUILTIN_TEMPO_POD")
+    return bool(pod and pod == cfg.server_id and not cfg.disable_tracing)
+
+
 def prepare_builtin_tempo(cfg: Config) -> bool:
-    """Write the configuration consumed by the Docker Tempo service."""
-    if not cfg.use_builtin_tempo():
+    """Write the configuration consumed by the supervised Tempo service."""
+    helm_tempo = _is_helm_tempo_pod(cfg)
+    if not helm_tempo and not cfg.use_builtin_tempo():
         return False
 
     path = Path(os.environ["GPUSTACK_RUN_DIR"]) / "tempo" / "config.yaml"
     data = Path(cfg.data_dir) / "tempo"
+    retention = os.getenv("GPUSTACK_BUILTIN_TEMPO_RETENTION") or "24h"
     loopback = "127.0.0.1"
     try:
         _write_yaml_atomically(
@@ -522,7 +529,7 @@ def prepare_builtin_tempo(cfg: Config) -> bool:
             {
                 "target": "all",
                 "server": {
-                    "http_listen_address": loopback,
+                    "http_listen_address": "0.0.0.0" if helm_tempo else loopback,
                     "http_listen_port": cfg.builtin_tempo_http_port,
                     "grpc_listen_address": loopback,
                     "grpc_listen_port": cfg.builtin_tempo_grpc_port,
@@ -550,7 +557,7 @@ def prepare_builtin_tempo(cfg: Config) -> bool:
                         "local": {"path": str(data / "blocks")},
                     },
                 },
-                "compactor": {"compaction": {"block_retention": "24h"}},
+                "compactor": {"compaction": {"block_retention": retention}},
                 "usage_report": {"reporting_enabled": False},
             },
         )

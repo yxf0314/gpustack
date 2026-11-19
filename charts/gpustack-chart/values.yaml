@@ -110,8 +110,6 @@ tracing:
   advertiseEndpoint: ""
   tempo:
     retention: 24h
-    # Ephemeral disk space for the Tempo Pod.
-    storageSize: 10Gi
 server:
   # Deploy the GPUStack server (control plane) from this release.
   #

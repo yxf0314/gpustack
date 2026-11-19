@@ -373,6 +373,13 @@ imagePullSecrets:
 {{- printf "%s-tempo" .Release.Name -}}
 {{- end -}}
 
+{{/* Keep a single Tempo instance on the first Server Pod's data volume. */}}
+{{- define "gpustack.tempoPodName" -}}
+{{- if and .Values.tracing.enabled .Values.server.enabled (not .Values.tracing.endpoint) -}}
+{{- printf "%s-server-0" .Release.Name -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "gpustack.tracingEndpoint" -}}
 {{- if .Values.tracing.enabled -}}
 {{- if .Values.tracing.endpoint -}}

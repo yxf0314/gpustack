@@ -141,6 +141,52 @@ def test_tempo_config_write_failure_skips_service_without_aborting_prerun(
     assert not (s6_base / "user" / "contents.d" / "tempo").exists()
 
 
+@pytest.mark.parametrize(
+    "server_id,disable_tracing,expected",
+    [
+        ("gpustack-server-0", False, True),
+        ("gpustack-server-1", False, False),
+        ("gpustack-server-0", True, False),
+    ],
+)
+def test_helm_tempo_uses_the_selected_servers_data_dir(
+    tmp_path, monkeypatch, server_id, disable_tracing, expected
+):
+    run_dir = tmp_path / "run"
+    data_dir = tmp_path / "server-data"
+    monkeypatch.setenv("GPUSTACK_RUN_DIR", str(run_dir))
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "kubernetes")
+    monkeypatch.setenv("GPUSTACK_SERVER_ID", server_id)
+    monkeypatch.setenv("GPUSTACK_BUILTIN_TEMPO_POD", "gpustack-server-0")
+    monkeypatch.setenv("GPUSTACK_BUILTIN_TEMPO_RETENTION", "12h")
+    endpoint = "gpustack-tempo.inference.svc.cluster.local:4317"
+    cfg = Config(
+        data_dir=str(data_dir),
+        gateway_mode="disabled",
+        trace_otlp_endpoint=endpoint,
+        disable_tracing=disable_tracing,
+    )
+
+    active = prerun.prepare_builtin_tempo(cfg)
+    services = prerun.determine_enabled_services(cfg, tempo_active=active)
+    assert active is expected
+    assert ("tempo" in services) is expected
+    assert (prerun.ports_for_services(cfg).get(4317) == "tempo") is expected
+    assert "tempo" not in prerun.determine_dependency_services(cfg)
+    assert cfg.effective_trace_otlp_endpoint == (None if disable_tracing else endpoint)
+    config_path = run_dir / "tempo" / "config.yaml"
+    assert config_path.exists() is expected
+    if expected:
+        config = yaml.safe_load(config_path.read_text())
+        assert config["server"]["http_listen_address"] == "0.0.0.0"
+        assert config["storage"]["trace"] == {
+            "backend": "local",
+            "wal": {"path": str(data_dir / "tempo" / "wal")},
+            "local": {"path": str(data_dir / "tempo" / "blocks")},
+        }
+        assert config["compactor"]["compaction"]["block_retention"] == "12h"
+
+
 def _one_gpustack_port(monkeypatch):
     monkeypatch.setattr(prerun, "ports_for_services", lambda cfg: {50000: "gpustack"})
 

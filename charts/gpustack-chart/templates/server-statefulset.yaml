@@ -93,6 +93,12 @@ spec:
             {{- with (include "gpustack.observabilityEnv" . | trim) }}
             {{- . | nindent 12 }}
             {{- end }}
+            {{- with (include "gpustack.tempoPodName" .) }}
+            - name: GPUSTACK_BUILTIN_TEMPO_POD
+              value: {{ . | quote }}
+            - name: GPUSTACK_BUILTIN_TEMPO_RETENTION
+              value: {{ $.Values.tracing.tempo.retention | quote }}
+            {{- end }}
             {{- if and .Values.tracing.enabled .Values.tracing.advertiseEndpoint }}
             - name: GPUSTACK_TRACE_ADVERTISE_ENDPOINT
               value: {{ .Values.tracing.advertiseEndpoint | quote }}
