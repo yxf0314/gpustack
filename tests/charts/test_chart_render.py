@@ -364,11 +364,13 @@ def test_bundled_higress_uses_stdout_and_shared_alloy(kind, logs, traces):
     )
     mesh = yaml.safe_load(higress_config["data"]["mesh"])
     assert mesh["accessLogFile"] == "/dev/stdout"
-    assert mesh["accessLogEncoding"] == "JSON"
-    assert (
-        yaml.safe_load(mesh["accessLogFormat"])["traceparent"]
-        == "%REQ(TRACEPARENT):55%"
-    )
+    assert mesh["accessLogEncoding"] == "TEXT"
+    fields = yaml.safe_load(mesh["accessLogFormat"])
+    assert fields["trace_id"] == "%REQ(X-B3-TRACEID)%"
+    assert "traceparent" not in fields
+    assert container_env(docs, "StatefulSet", "gpustack-server")[
+        "GPUSTACK_HELM_HIGRESS_LOG_FORMAT"
+    ] == ("managed" if logs or traces else "default")
     assert "gpustack-higress-file-log" not in names(docs, "EnvoyFilter")
     assert ("gpustack-alloy" in names(docs, "Deployment")) is logs
     if not logs:
@@ -433,6 +435,9 @@ def test_bundled_higress_tracing_preserves_custom_stdout_format():
     mesh = yaml.safe_load(higress_config["data"]["mesh"])
     assert mesh["accessLogFormat"] == "%REQ(:METHOD)%"
     assert mesh["accessLogEncoding"] == "TEXT"
+    assert "GPUSTACK_HELM_HIGRESS_LOG_FORMAT" not in container_env(
+        docs, "StatefulSet", "gpustack-server"
+    )
 
 
 @pytest.mark.parametrize(

@@ -354,11 +354,16 @@ def get_ingress_fallback_envoyfilter(
 
 
 def configure_higress_access_log_context(
-    mesh: dict, defaults: dict, *, trace_enabled: bool, log_enabled: bool
+    mesh: dict,
+    defaults: dict,
+    *,
+    trace_enabled: bool,
+    log_enabled: bool,
+    trace_format: Optional[str] = None,
 ) -> bool:
     """Switch the bundled access-log format while preserving user formats."""
     default_format = defaults["accessLogFormat"]
-    trace_format = default_format.replace(
+    trace_format = trace_format or default_format.replace(
         '"trace_id":"%REQ(X-B3-TRACEID)%"',
         '"traceparent":"%REQ(TRACEPARENT):55%"',
     )

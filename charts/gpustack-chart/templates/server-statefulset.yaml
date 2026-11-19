@@ -64,6 +64,15 @@ spec:
             {{- if index .Values "higress-core" "enabled" }}
             - name: GPUSTACK_GATEWAY_NAMESPACE
               value: "{{ .Release.Namespace }}"
+            {{- $mesh := index .Values "higress-core" "meshConfig" | default dict }}
+            {{- if not (or (hasKey $mesh "accessLogEncoding") (hasKey $mesh "accessLogFormat")) }}
+            - name: GPUSTACK_HELM_HIGRESS_LOG_FORMAT
+              {{- if or (include "gpustack.collectHigressLogs" .) (and (index .Values "higress-core" "global" "enableIstioAPI") (include "gpustack.tracingEndpoint" .)) }}
+              value: "managed"
+              {{- else }}
+              value: "default"
+              {{- end }}
+            {{- end }}
             {{- else if .Values.gateway.namespace }}
             - name: GPUSTACK_GATEWAY_NAMESPACE
               value: "{{ .Values.gateway.namespace }}"

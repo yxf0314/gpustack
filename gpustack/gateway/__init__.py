@@ -32,6 +32,11 @@ from gpustack.gateway.client import (
     McpBridgeRegistry,
     WasmPluginSpec,
 )
+from gpustack.gateway.client.networking_istio_io_v1alpha3_api import (
+    HIGRESS_CONFIGMAP,
+    HIGRESS_DEFAULT_CONFIG,
+    configure_higress_access_log_context,
+)
 from gpustack.gateway.labels_annotations import managed_labels, match_labels
 from gpustack.gateway.utils import (
     default_mcp_bridge_name,
@@ -786,6 +791,51 @@ async def ensure_gateway_timeout(cfg: Config, api_client: k8s_client.ApiClient):
         raise
 
 
+async def ensure_bundled_gateway_log_context(
+    cfg: Config, api_client: k8s_client.ApiClient, *, managed: bool
+) -> None:
+    """Apply the selected default to the bundled gateway's live mesh config."""
+    client = k8s_client.CoreV1Api(api_client=api_client)
+    name = "higress-config"
+    try:
+        template = yaml.safe_load(
+            (HIGRESS_DEFAULT_CONFIG / HIGRESS_CONFIGMAP).read_text()
+        )
+        defaults = yaml.safe_load(template["data"]["mesh"])
+        trace_format = (
+            defaults["accessLogFormat"].rstrip().removesuffix("}")
+            + ',"traceparent":"%REQ(TRACEPARENT):55%"}'
+        )
+        configmap = await client.read_namespaced_config_map(
+            name=name, namespace=cfg.gateway_namespace
+        )
+        mesh = yaml.safe_load(configmap.data["mesh"])
+        if configure_higress_access_log_context(
+            mesh,
+            defaults,
+            trace_enabled=managed,
+            log_enabled=False,
+            trace_format=trace_format,
+        ):
+            await client.patch_namespaced_config_map(
+                name=name,
+                namespace=cfg.gateway_namespace,
+                _content_type="application/merge-patch+json",
+                body={
+                    "metadata": {
+                        "resourceVersion": configmap.metadata.resource_version
+                    },
+                    "data": {"mesh": yaml.safe_dump(mesh, sort_keys=False)},
+                },
+            )
+    except (ApiException, OSError, yaml.YAMLError, KeyError, TypeError) as exc:
+        logger.warning(
+            "Could not configure the bundled Higress access-log format (%s, status %s)",
+            type(exc).__name__,
+            getattr(exc, "status", None),
+        )
+
+
 def spec_replace(
     current_spec: Optional[WasmPluginSpec],
     expected_spec: WasmPluginSpec,
@@ -998,6 +1048,10 @@ def initialize_gateway(cfg: Config, timeout: int = 60, interval: int = 5):
             if cfg.gateway_mode != GatewayModeEnum.incluster:
                 await ensure_gateway_timeout(cfg=cfg, api_client=api_client)
                 await ensure_ingress_resources(cfg=cfg, api_client=api_client)
+            elif mode := os.getenv("GPUSTACK_HELM_HIGRESS_LOG_FORMAT"):
+                await ensure_bundled_gateway_log_context(
+                    cfg, api_client, managed=mode == "managed"
+                )
             for plugin_name, plugin_spec in plugin_list:
                 spec_diff_func = _spec_diff_for(
                     plugin_name, plugin_spec, route_plugin_diffs
