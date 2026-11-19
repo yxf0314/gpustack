@@ -1744,7 +1744,10 @@ def test_cleanup_old_logs_keeps_only_current_and_previous_restart(tmp_path: Path
     ]
 
 
-def test_worker_registers_and_retires_managed_engine_archives(tmp_path):
+@pytest.mark.parametrize("delete_instance", [False, True])
+def test_worker_registers_and_retires_managed_engine_archives(
+    tmp_path, delete_instance
+):
     manager, _clients = _build_serve_manager(worker_id=1)
     serve_dir = tmp_path / "serve"
     manager._serve_log_dir = str(serve_dir)
@@ -1779,9 +1782,18 @@ def test_worker_registers_and_retires_managed_engine_archives(tmp_path):
 
     manager._cleanup_old_logs(instance.id, 5)
     assert 4 in restart_log_dirs(serve_dir, instance.id)
-    manager._cleanup_old_logs(instance.id, 6)
+    engine_log = container_log_path(serve_dir, instance.name, instance.id, 4)
+    with engine_log.open("a") as stream:
+        stream.write("\nERROR final engine error\n")
+    if delete_instance:
+        manager._purge_instance_logs(instance.id)
+    else:
+        manager._cleanup_old_logs(instance.id, 6)
     assert not restart_log_dirs(serve_dir, instance.id)
-    assert (alias / "container.log").read_text() == "engine-a"
+    assert not engine_log.exists()
+    assert (
+        alias / "container.log"
+    ).read_text() == "engine-a\nERROR final engine error\n"
 
 
 def test_cleanup_old_logs_restart_zero_purges_all(tmp_path: Path):
