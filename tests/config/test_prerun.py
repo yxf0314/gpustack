@@ -86,8 +86,9 @@ def test_builtin_tempo_config_and_service(tmp_path, monkeypatch):
 
     monkeypatch.setattr(prerun, "is_port_available", lambda port: port != 13417)
     monkeypatch.setattr(prerun, "is_port_reusable", lambda port: False)
-    with pytest.raises(Exception, match="required ports are not available"):
-        check_ports_availability(cfg, *services)
+    check_ports_availability(cfg, *services)
+    assert service.exists()
+    assert cfg.effective_trace_otlp_endpoint.endswith(":13417")
 
     external = cfg.model_copy(update={"trace_otlp_endpoint": "collector:4317"})
     active = prerun.prepare_builtin_tempo(external)

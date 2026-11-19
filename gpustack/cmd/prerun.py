@@ -151,10 +151,11 @@ def check_ports_availability(cfg: Config, *services: str):
     # Implement port availability checks here
     all_services = list(services) + [gpustack_service_name]
     ports = ports_for_services(cfg)
+    # Tempo's longrun waits for occupied ports without blocking the Server.
     ports_to_check = {
         port: service
         for port, service in ports.items()
-        if not all_services or service in all_services
+        if service in all_services and service not in trace_storage_services.services
     }
     should_fail = False
     for port, service in ports_to_check.items():

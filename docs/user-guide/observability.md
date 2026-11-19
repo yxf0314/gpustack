@@ -130,7 +130,7 @@ Pass them with `docker run -e` or under `environment` in your Compose file. The 
 
 The built-in Tempo runs in the Server container and stores data in the `tempo` subdirectory of the GPUStack data directory. Mount that subdirectory on a separate volume with a storage limit so trace growth cannot fill the Server data volume. Retention limits the age of stored traces. Disk usage also depends on request volume and the number of spans per request.
 
-The Server checks Tempo's ingest, query, and internal gRPC ports before startup. Their defaults are 4317, 3200, and 9095. To resolve a conflict, set `GPUSTACK_BUILTIN_TEMPO_OTLP_PORT`, `GPUSTACK_BUILTIN_TEMPO_HTTP_PORT`, or `GPUSTACK_BUILTIN_TEMPO_GRPC_PORT`. The query and internal gRPC ports bind to loopback.
+Tempo's ingest, query, and internal gRPC ports default to 4317, 3200, and 9095. If another process occupies one of these ports, the Server continues starting while the Tempo service checks its configured ports every five seconds. Tempo starts on the same ports once they become available. To configure different ports, set `GPUSTACK_BUILTIN_TEMPO_OTLP_PORT`, `GPUSTACK_BUILTIN_TEMPO_HTTP_PORT`, or `GPUSTACK_BUILTIN_TEMPO_GRPC_PORT`. The query and internal gRPC ports bind to loopback.
 
 Independent Workers receive `GPUSTACK_TRACE_OTLP_ENDPOINT` in the platform-generated registration command. For remote Workers to use the built-in receiver, make its OTLP port reachable from their trusted network. Set `GPUSTACK_TRACE_ADVERTISE_ENDPOINT` on the Server if those Workers use a different hostname or published port.
 
