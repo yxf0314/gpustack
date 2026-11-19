@@ -93,6 +93,7 @@ def create_app(cfg: Config) -> FastAPI:
             ),
         )
     if native_inference:
+        app.add_exception_handler(Exception, middlewares.inference_server_error)
         app.add_middleware(
             middlewares.InferenceAccessMiddleware,
             paths={

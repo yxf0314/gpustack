@@ -226,6 +226,39 @@ def test_native_rejection_has_trace_and_access_log(config, caplog, traceparent):
     provider.shutdown()
 
 
+def test_unhandled_inference_error_correlates_response_log_and_trace(
+    config, caplog, monkeypatch
+):
+    app = create_app(
+        config.model_copy(update={"gateway_mode": GatewayModeEnum.disabled})
+    )
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider(shutdown_on_exit=False)
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    app.state.inference_tracer = provider.get_tracer(__name__)
+
+    async def fail(self, request, call_next):
+        raise RuntimeError("private details")
+
+    monkeypatch.setattr(middlewares.ModelUsageMiddleware, "dispatch", fail)
+    with caplog.at_level("INFO", logger="gpustack.inference.access"):
+        response = TestClient(app, raise_server_exceptions=False).post(
+            "/v1/chat/completions"
+        )
+
+    assert response.status_code == 500
+    assert response.text == "Internal Server Error"
+    request_id = response.headers["X-GPUStack-Request-Id"]
+    (record,) = [r for r in caplog.records if r.name == "gpustack.inference.access"]
+    assert record.request_id == request_id
+    assert record.response_code == 500
+    (span,) = exporter.get_finished_spans()
+    assert span.attributes["gpustack.request_id"] == request_id
+    assert span.attributes["http.response.status_code"] == 500
+    assert span.attributes["error.type"] == "RuntimeError"
+    provider.shutdown()
+
+
 @pytest.mark.parametrize(
     "gateway_mode", [GatewayModeEnum.disabled, GatewayModeEnum.embedded]
 )

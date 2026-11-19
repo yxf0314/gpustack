@@ -7,11 +7,17 @@ import time
 from typing import Set, Type, Union
 from uuid import uuid4
 from fastapi import Request, Response, status
-from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
+from fastapi.responses import (
+    FileResponse,
+    StreamingResponse,
+    JSONResponse,
+    PlainTextResponse,
+)
 from jwt import DecodeError, ExpiredSignatureError
 from starlette._utils import get_route_path
 from starlette.datastructures import MutableHeaders
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import ClientDisconnect
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from openai.types import CompletionUsage
@@ -22,7 +28,12 @@ from openai.types.create_embedding_response import (
     Usage as EmbeddingUsage,
 )
 from gpustack.api.exceptions import ErrorResponse
-from gpustack.observability.tracing import trace_inference_http, trace_log_fields
+from gpustack.observability.tracing import (
+    current_inference_span,
+    set_http_status,
+    trace_inference_http,
+    trace_log_fields,
+)
 from gpustack.routes.rerank import RerankResponse, RerankUsage
 from gpustack.schemas.images import ImageGenerationChunk, ImagesResponse
 from gpustack.schemas.model_usage import OperationEnum
@@ -83,6 +94,13 @@ class InferenceAccessMiddleware:
         async def record_access(scope: Scope, receive: Receive, send: Send) -> None:
             try:
                 await self.app(scope, receive, send)
+            except ClientDisconnect:
+                raise
+            except Exception:
+                if "response_code" not in access:
+                    access["response_code"] = status.HTTP_500_INTERNAL_SERVER_ERROR
+                    set_http_status(current_inference_span(), access["response_code"])
+                raise
             finally:
                 access["duration"] = round((time.monotonic() - start) * 1000)
                 inference_access_logger.info(
@@ -110,6 +128,16 @@ class InferenceAccessMiddleware:
                     "gpustack.request_id": request_id,
                 },
             )
+
+
+async def inference_server_error(request: Request, _exc: Exception) -> Response:
+    """Attach the request ID to the outer middleware's fallback 500."""
+    access = getattr(request.state, "inference_access", None)
+    return PlainTextResponse(
+        "Internal Server Error",
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        headers={GPUSTACK_REQUEST_ID_HEADER: access["request_id"]} if access else None,
+    )
 
 
 @functools.lru_cache(maxsize=1)
