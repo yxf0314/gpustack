@@ -204,6 +204,7 @@ def test_engine_observability_switches(tmp_path, engine, logs, traces):
         assert launch["env"].get("SGLANG_LOG_REQUEST_HEADERS") == (
             "x-request-id" if logs else None
         )
+        assert launch["env"].get("SGLANG_TRACE_LEVEL") == ("1" if traces else None)
 
 
 @pytest.mark.parametrize("engine", _ENGINE_SETUP)
@@ -225,6 +226,7 @@ def test_engine_observability_with_pd_recipe(tmp_path, engine, role, logs):
     else:
         assert arguments[arguments.index("--disaggregation-mode") + 1] == role
         assert arguments.count("--enable-trace") == 1
+        assert launch["env"]["SGLANG_TRACE_LEVEL"] == "1"
 
 
 @pytest.mark.parametrize(
@@ -242,6 +244,7 @@ def test_engine_observability_with_pd_recipe(tmp_path, engine, role, logs):
         ("vllm", ["--otlp_traces_endpoint=other:4317"], {}, True, False),
         ("sglang", ["--log-requests-format=text"], {}, False, True),
         ("sglang", [], {"SGLANG_LOG_REQUEST_HEADERS": "authorization"}, False, True),
+        ("sglang", [], {"SGLANG_TRACE_LEVEL": "3"}, True, True),
         (
             "sglang",
             ["--enable-trace", "--otlp-traces-endpoint=other:4317"],

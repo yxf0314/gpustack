@@ -770,6 +770,8 @@ class SGLangServer(InferenceServer):
             and not env.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
             and env.get("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc") == "grpc"
         ):
+            # Keep the major stages while omitting per-step decode spans.
+            env.setdefault("SGLANG_TRACE_LEVEL", "1")
             arguments.extend(
                 ["--enable-trace", "--otlp-traces-endpoint", config.trace_otlp_endpoint]
             )
