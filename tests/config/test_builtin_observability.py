@@ -117,6 +117,8 @@ def test_incluster_gateway_scrape_job_uses_pod_discovery(tmp_path, monkeypatch):
 
 
 def test_prepare_prometheus_config_writes_observability_env(tmp_path, monkeypatch):
+    import yaml
+
     cfg = Config(
         data_dir=str(tmp_path / "data"),
         builtin_prometheus_port=19100,
@@ -135,15 +137,16 @@ def test_prepare_prometheus_config_writes_observability_env(tmp_path, monkeypatc
 
     env_text = observability_config_path.read_text()
     prom_text = prometheus_config.read_text()
-    datasource_text = (
-        grafana_provisioning_dir / "datasources" / "datasource.yaml"
-    ).read_text()
+    datasource = yaml.safe_load(
+        (grafana_provisioning_dir / "datasources" / "datasource.yaml").read_text()
+    )["datasources"][0]
 
     assert "PROMETHEUS_PORT=19100" in env_text
     assert "GF_SERVER_HTTP_PORT=13100" in env_text
     assert f"PROMETHEUS_DATA_DIR={tmp_path / 'data' / 'prometheus'}" in env_text
     assert "127.0.0.1:10161/metrics/targets" in prom_text
-    assert "url: http://127.0.0.1:19100/prometheus" in datasource_text
+    assert datasource["url"] == "http://127.0.0.1:19100/prometheus"
+    assert datasource["orgId"] == 1
 
 
 @pytest.mark.asyncio

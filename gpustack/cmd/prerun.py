@@ -606,7 +606,7 @@ datasources:
     isDefault: true
     access: proxy
     editable: true
-  orgId: 1
+    orgId: 1
 """
     )
 
