@@ -52,7 +52,7 @@ spec:
       targetPort: http
 ---
 apiVersion: apps/v1
-kind: StatefulSet
+kind: Deployment
 metadata:
   name: {{ $name }}
   namespace: {{ .Release.Namespace }}
@@ -60,7 +60,8 @@ metadata:
 {{ include "chart_labels" . | indent 4 }}
 spec:
   replicas: 1
-  serviceName: {{ $name }}
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: {{ $name }}
@@ -120,16 +121,7 @@ spec:
         - name: config
           configMap:
             name: {{ $name }}
-  # StatefulSet claims are retained when the workload is removed.
-  volumeClaimTemplates:
-    - metadata:
-        name: data
-      spec:
-        accessModes: [ReadWriteOnce]
-        {{- if kindIs "string" .Values.tracing.tempo.storageClassName }}
-        storageClassName: {{ .Values.tracing.tempo.storageClassName | quote }}
-        {{- end }}
-        resources:
-          requests:
-            storage: {{ .Values.tracing.tempo.storageSize | quote }}
+        - name: data
+          emptyDir:
+            sizeLimit: {{ .Values.tracing.tempo.storageSize | quote }}
 {{- end }}

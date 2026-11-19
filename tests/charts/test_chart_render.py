@@ -211,7 +211,7 @@ def test_observability_endpoints_reach_server_and_workers(logs, trace_mode):
         assert env.get("GPUSTACK_DISABLE_TRACING") == (
             "true" if trace_mode == "disabled" else None
         )
-    for kind in ("StatefulSet", "Service", "ConfigMap"):
+    for kind in ("Deployment", "Service", "ConfigMap"):
         assert ("gpustack-tempo" in names(docs, kind)) is (trace_mode == "builtin")
     assert "gpustack-higress-log-collector" not in names(docs, "DaemonSet")
     assert ("gpustack-otel-tracing" in names(docs, "EnvoyFilter")) is (
@@ -219,12 +219,12 @@ def test_observability_endpoints_reach_server_and_workers(logs, trace_mode):
     )
 
 
-def test_bundled_tempo_uses_persistent_storage_and_a_cluster_service():
+def test_bundled_tempo_uses_ephemeral_storage_and_a_cluster_service():
     docs = render(
         "--namespace",
         "inference",
         "--set",
-        "tracing.tempo.storageClassName=ssd,"
+        "server.dataVolume.hostPath=/srv/gpustack,"
         "tracing.advertiseEndpoint=trace.example:4317",
     )
     tempo = {d["kind"]: d for d in docs if d["metadata"]["name"] == "gpustack-tempo"}
@@ -234,26 +234,19 @@ def test_bundled_tempo_uses_persistent_storage_and_a_cluster_service():
         ("otlp-grpc", 4317),
         ("http", 3200),
     ]
-    statefulset = tempo["StatefulSet"]["spec"]
-    assert statefulset["replicas"] == 1
-    assert statefulset["template"]["metadata"]["labels"] == service["selector"]
-    assert statefulset["volumeClaimTemplates"] == [
-        {
-            "metadata": {"name": "data"},
-            "spec": {
-                "accessModes": ["ReadWriteOnce"],
-                "storageClassName": "ssd",
-                "resources": {"requests": {"storage": "10Gi"}},
-            },
-        }
-    ]
-    assert (
-        statefulset.get("persistentVolumeClaimRetentionPolicy", {}).get(
-            "whenDeleted", "Retain"
-        )
-        == "Retain"
+    deployment = tempo["Deployment"]["spec"]
+    assert deployment["replicas"] == 1
+    assert deployment["strategy"] == {"type": "Recreate"}
+    assert deployment["template"]["metadata"]["labels"] == service["selector"]
+    assert not names(docs, "PersistentVolumeClaim")
+    server_workload = next(
+        doc
+        for doc in docs
+        if doc["metadata"]["name"] == "gpustack-server" and doc["kind"] == "StatefulSet"
     )
-    pod = statefulset["template"]["spec"]
+    assert "volumeClaimTemplates" not in server_workload["spec"]
+    pod = deployment["template"]["spec"]
+    assert {"name": "data", "emptyDir": {"sizeLimit": "10Gi"}} in pod["volumes"]
     assert pod["automountServiceAccountToken"] is False
     assert pod["containers"][0]["image"] == "docker.io/grafana/tempo:2.10.10"
     assert {"name": "data", "mountPath": "/var/tempo"} in pod["containers"][0][
@@ -560,7 +553,7 @@ def test_existing_gateway_and_worker_only_telemetry():
     )
     assert "gpustack-higress-file-log" not in names(docs, "EnvoyFilter")
     assert "gpustack-higress-collector" not in names(docs, "ConfigMap")
-    assert "gpustack-tempo" not in names(docs, "StatefulSet")
+    assert "gpustack-tempo" not in names(docs, "Deployment")
     docs = render(*WORKER_ONLY, *SERVER_AND_TOKEN, *settings)
     assert (
         container_env(docs, "DaemonSet", "gpustack-worker")[
@@ -572,20 +565,20 @@ def test_existing_gateway_and_worker_only_telemetry():
     assert "gpustack-higress-log-collector" not in names(docs, "DaemonSet")
     assert "gpustack-higress-file-log" not in names(docs, "EnvoyFilter")
     assert "gpustack-higress-collector" not in names(docs, "ConfigMap")
-    assert "gpustack-tempo" not in names(docs, "StatefulSet")
+    assert "gpustack-tempo" not in names(docs, "Deployment")
 
 
 def test_worker_only_without_a_trace_endpoint_has_no_tempo():
     docs = render(*WORKER_ONLY, *SERVER_AND_TOKEN)
     worker = container_env(docs, "DaemonSet", "gpustack-worker")
     assert "GPUSTACK_TRACE_OTLP_ENDPOINT" not in worker
-    assert "gpustack-tempo" not in names(docs, "StatefulSet")
+    assert "gpustack-tempo" not in names(docs, "Deployment")
 
 
 def test_builtin_tracing_does_not_require_the_higress_istio_api():
     docs = render("--set", "higress-core.global.enableIstioAPI=false")
     assert "gpustack-otel-tracing" not in names(docs, "EnvoyFilter")
-    assert "gpustack-tempo" in names(docs, "StatefulSet")
+    assert "gpustack-tempo" in names(docs, "Deployment")
     server = container_env(docs, "StatefulSet", "gpustack-server")
     assert server["GPUSTACK_TRACE_OTLP_ENDPOINT"] == (
         "gpustack-tempo.default.svc.cluster.local:4317"

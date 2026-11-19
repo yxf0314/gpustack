@@ -105,7 +105,7 @@ If you already have an external Prometheus/Grafana stack, you can configure it m
 
 ## Inference Logs and Traces
 
-Use the `X-GPUStack-Request-Id` response header to look up inference logs and traces. The bundled gateway adds this header when logging or tracing is configured. Docker servers and Helm server releases export traces to built-in Tempo by default. Built-in Tempo retains traces for 24 hours by default. Log export is independent and requires a log endpoint.
+Use the `X-GPUStack-Request-Id` response header to look up inference logs and traces. The bundled gateway adds this header when logging or tracing is configured. Docker servers and Helm server releases export traces to built-in Tempo by default. Built-in Tempo uses a 24-hour retention period by default. Log export is independent and requires a log endpoint.
 
 | Trace destination | Docker | Helm |
 | --- | --- | --- |
@@ -115,7 +115,7 @@ Use the `X-GPUStack-Request-Id` response header to look up inference logs and tr
 
 When log export is enabled, the Server and Workers write one JSON stream to the container console. Alloy reads that stream alongside supported engine log formats. To check for discarded records, use Alloy's `otelcol_processor_filter_logs_filtered_total` metric with the `engine_format` or `higress_format` component. The engine filter rejects standalone plain-text lines without a recognized log prefix.
 
-Each tracing component sends spans directly to the selected receiver. The log endpoint must be reachable from the GPUStack containers that export logs. The trace endpoint must be reachable from the Server, Workers, gateways, and inference containers that export traces. The tracing connection uses plaintext gRPC, so use an address on a trusted network. Switching to an external receiver or disabling tracing stops the built-in instance. Its data remains on disk.
+Each tracing component sends spans directly to the selected receiver. The log endpoint must be reachable from the GPUStack containers that export logs. The trace endpoint must be reachable from the Server, Workers, gateways, and inference containers that export traces. The tracing connection uses plaintext gRPC, so use an address on a trusted network. Switching to an external receiver or disabling tracing stops the built-in instance. Docker keeps the trace data on disk.
 
 ### Configure Docker
 
@@ -153,7 +153,7 @@ Use a namespace-qualified Service DNS name for a Collector in another namespace.
 
 Setting `logging.endpoint` deploys one Alloy instance per Helm release. Alloy reads the release's GPUStack Pod logs using the Kubernetes API. If an existing agent collects the bundled Higress gateway's stdout, set `logging.higress.enabled=false` to leave those logs with that agent.
 
-The built-in Tempo uses an internal Service and a dedicated PersistentVolumeClaim. Worker-only releases can use the Server's receiver by setting `tracing.endpoint`. Platform-generated Worker manifests include that endpoint when tracing is enabled on the Server. Set `tracing.advertiseEndpoint` on the Server release to advertise a separately reachable address to Workers outside that Kubernetes network.
+The built-in Tempo uses an internal Service and an ephemeral `emptyDir` volume for short-term diagnostics. The volume survives container restarts in the same Pod. Replacing or removing the Tempo Pod deletes its traces. Use an external receiver with persistent storage for long-term trace retention. Worker-only releases can use the Server's receiver by setting `tracing.endpoint`. Platform-generated Worker manifests include that endpoint when tracing is enabled on the Server. Set `tracing.advertiseEndpoint` on the Server release to advertise a separately reachable address to Workers outside that Kubernetes network.
 
 The bundled gateway's default access log format includes `request_id` and can include `traceparent` when tracing is enabled. For managed log collection, a custom Higress access log format must emit one JSON object per line with top-level string fields `path` and `request_id`. Alloy filters health endpoints using `path` and uses `request_id` to link records to inference requests. Records without a string `path` are counted as dropped by Alloy's `higress_format` filter. To retain a different format on Helm, set `logging.higress.enabled=false` to handle gateway logs with your own collector.
 
