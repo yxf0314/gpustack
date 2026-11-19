@@ -438,7 +438,7 @@ def test_embedded_tracing_preserves_operator_access_log_format(embedded_gateway)
     ("encoding", "access_log_format", "valid"),
     [
         ("JSON", '{"path":"%REQ(:PATH)%","request_id":"%REQ(X-REQUEST-ID)%"}', True),
-        ("TEXT", '{"path":"%REQ(:PATH)%","request_id":"%REQ(X-REQUEST-ID)%"}', False),
+        ("TEXT", '{"path":"%REQ(:PATH)%","request_id":"%REQ(X-REQUEST-ID)%"}', True),
         ("JSON", '{"path":"%REQ(:PATH)%"}', False),
         ("TEXT", "", False),
     ],
@@ -462,7 +462,9 @@ def test_embedded_log_collection_reports_incompatible_format(
     )
 
     assert configmap_path.read_text() == contents
-    assert ("Higress access-log export requires JSON" in caplog.text) is not valid
+    assert (
+        "Could not verify the Higress access-log template" in caplog.text
+    ) is not valid
 
 
 def test_embedded_gateway_reconfigures_tracing_without_replacing_existing_settings(

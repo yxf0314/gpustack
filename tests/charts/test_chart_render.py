@@ -443,38 +443,31 @@ def test_bundled_higress_tracing_preserves_custom_stdout_format():
 @pytest.mark.parametrize(
     "encoding,access_log_format",
     [
-        ("JSON", "%REQ(:PATH)%"),
-        ("JSON", '{"path":"%REQ(:PATH)%"}'),
-        ("JSON", '{"path":1,"request_id":"id"}'),
+        ("JSON", '{"path":"%REQ(:PATH)%","request_id":"%REQ(X-REQUEST-ID)%"}'),
         ("TEXT", '{"path":"%REQ(:PATH)%","request_id":"%REQ(X-REQUEST-ID)%"}'),
-        ("TEXT", ""),
+        (
+            "TEXT",
+            '{"path":"%REQ(:PATH)%","request_id":"%REQ(X-REQUEST-ID)%",'
+            '"response_code":%RESPONSE_CODE%}',
+        ),
     ],
 )
-def test_bundled_higress_log_collection_rejects_incompatible_format(
+def test_bundled_higress_log_collection_preserves_custom_format(
     encoding, access_log_format
 ):
-    error = render_error(
+    docs = render(
         "--set",
         "logging.endpoint=http://otel:4318/v1/logs,"
         f"higress-core.meshConfig.accessLogEncoding={encoding}",
         "--set-literal",
         f"higress-core.meshConfig.accessLogFormat={access_log_format}",
     )
-    assert "JSON with string path and request_id fields" in error
-
-
-def test_bundled_higress_log_collection_accepts_custom_json_format():
-    access_log_format = '{"path":"%REQ(:PATH)%","request_id":"%REQ(X-REQUEST-ID)%"}'
-    docs = render(
-        "--set",
-        "logging.endpoint=http://otel:4318/v1/logs",
-        "--set-literal",
-        f"higress-core.meshConfig.accessLogFormat={access_log_format}",
-    )
     configmap = next(doc for doc in docs if doc["metadata"]["name"] == "higress-config")
-    assert (
-        yaml.safe_load(configmap["data"]["mesh"])["accessLogFormat"]
-        == access_log_format
+    mesh = yaml.safe_load(configmap["data"]["mesh"])
+    assert mesh["accessLogEncoding"] == encoding
+    assert mesh["accessLogFormat"] == access_log_format
+    assert "GPUSTACK_HELM_HIGRESS_LOG_FORMAT" not in container_env(
+        docs, "StatefulSet", "gpustack-server"
     )
 
 

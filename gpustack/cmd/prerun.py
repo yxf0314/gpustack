@@ -340,14 +340,13 @@ def _set_higress_access_log_context(
         _write_yaml_atomically(configmap_path, configmap)
     if log_enabled and not _supports_higress_log_collection(mesh):
         logger.warning(
-            "Higress access-log export requires JSON records with string "
-            "path and request_id fields. Check mesh.accessLogEncoding and "
-            "mesh.accessLogFormat."
+            "Could not verify the Higress access-log template. Check that emitted "
+            "records are JSON with string path and request_id fields."
         )
 
 
 def _supports_higress_log_collection(mesh: dict) -> bool:
-    if not isinstance(mesh, dict) or mesh.get("accessLogEncoding") != "JSON":
+    if not isinstance(mesh, dict):
         return False
     try:
         fields = json.loads(mesh.get("accessLogFormat", ""))

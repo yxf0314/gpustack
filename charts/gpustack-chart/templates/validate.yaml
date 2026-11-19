@@ -50,17 +50,6 @@ supplying a username and password asks for.
 {{- fail "logging.authorizationSecret and logging.caSecret require an HTTPS logging.endpoint." }}
 {{- end }}
 {{- end }}
-{{- if include "gpustack.collectHigressLogs" . }}
-{{- $gateway := index .Subcharts "higress-core" }}
-{{- $mesh := $gateway.Values.meshConfig | default dict }}
-{{- if or (hasKey $mesh "accessLogEncoding") (hasKey $mesh "accessLogFormat") }}
-{{- $effective := mergeOverwrite (include "mesh" $gateway | fromYaml) $mesh }}
-{{- $fields := fromJson (toString $effective.accessLogFormat) }}
-{{- if not (and (eq ($mesh.accessLogEncoding | default "JSON") "JSON") (kindIs "string" $fields.path) (kindIs "string" $fields.request_id)) }}
-{{- fail "Higress log collection requires JSON with string path and request_id fields. Set higress-core.meshConfig.accessLogEncoding=JSON and configure accessLogFormat, or set logging.higress.enabled=false." }}
-{{- end }}
-{{- end }}
-{{- end }}
 {{- if .Values.tracing.enabled }}
 {{- range $field, $endpoint := dict "endpoint" .Values.tracing.endpoint "advertiseEndpoint" .Values.tracing.advertiseEndpoint }}
 {{- if $endpoint }}
