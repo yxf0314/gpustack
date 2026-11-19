@@ -333,18 +333,21 @@ def _set_higress_access_log_context(
         else template
     )
     mesh = yaml.safe_load(configmap["data"]["mesh"])
-    if configure_higress_access_log_context(mesh, defaults, trace_enabled):
+    if configure_higress_access_log_context(
+        mesh, defaults, trace_enabled=trace_enabled, log_enabled=log_enabled
+    ):
         configmap["data"]["mesh"] = yaml.safe_dump(mesh, sort_keys=False)
         _write_yaml_atomically(configmap_path, configmap)
     if log_enabled and not _supports_higress_log_collection(mesh):
         logger.warning(
             "Higress access-log export requires JSON records with string "
-            "path and request_id fields. Update mesh.accessLogFormat."
+            "path and request_id fields. Check mesh.accessLogEncoding and "
+            "mesh.accessLogFormat."
         )
 
 
 def _supports_higress_log_collection(mesh: dict) -> bool:
-    if not isinstance(mesh, dict):
+    if not isinstance(mesh, dict) or mesh.get("accessLogEncoding") != "JSON":
         return False
     try:
         fields = json.loads(mesh.get("accessLogFormat", ""))

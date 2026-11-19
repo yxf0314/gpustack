@@ -317,6 +317,12 @@ def test_embedded_logs_only_keeps_request_id_after_disabling_tracing(embedded_ga
     assert manager["local_reply_config"]["mappers"][0]["headers_to_add"] == expected
     assert route_patch["patch"]["value"]["response_headers_to_add"] == expected
     configmap = yaml.safe_load((apiserver / HIGRESS_CONFIGMAP_PATH).read_text())
+    mesh = yaml.safe_load(configmap["data"]["mesh"])
+    assert mesh["accessLogEncoding"] == "JSON"
+    assert "traceparent" not in json.loads(mesh["accessLogFormat"])
+
+    prerun.prepare_gateway_config(cfg.model_copy(update={"disable_tracing": True}))
+    configmap = yaml.safe_load((apiserver / HIGRESS_CONFIGMAP_PATH).read_text())
     assert yaml.safe_load(configmap["data"]["mesh"])["accessLogEncoding"] == "TEXT"
 
 
@@ -355,21 +361,23 @@ def test_embedded_tracing_preserves_operator_access_log_format(embedded_gateway)
 
 
 @pytest.mark.parametrize(
-    ("access_log_format", "valid"),
+    ("encoding", "access_log_format", "valid"),
     [
-        ('{"path":"%REQ(:PATH)%","request_id":"%REQ(X-REQUEST-ID)%"}', True),
-        ('{"path":"%REQ(:PATH)%"}', False),
-        ("%REQ(:PATH)% %REQ(X-REQUEST-ID)%", False),
+        ("JSON", '{"path":"%REQ(:PATH)%","request_id":"%REQ(X-REQUEST-ID)%"}', True),
+        ("TEXT", '{"path":"%REQ(:PATH)%","request_id":"%REQ(X-REQUEST-ID)%"}', False),
+        ("JSON", '{"path":"%REQ(:PATH)%"}', False),
+        ("TEXT", "", False),
     ],
 )
 def test_embedded_log_collection_reports_incompatible_format(
-    embedded_gateway, caplog, access_log_format, valid
+    embedded_gateway, caplog, encoding, access_log_format, valid
 ):
     cfg, apiserver, templates = embedded_gateway
     configmap_path = apiserver / HIGRESS_CONFIGMAP_PATH
     configmap_path.parent.mkdir(parents=True)
     configmap = yaml.safe_load((templates / HIGRESS_CONFIGMAP_PATH).read_text())
     mesh = yaml.safe_load(configmap["data"]["mesh"])
+    mesh["accessLogEncoding"] = encoding
     mesh["accessLogFormat"] = access_log_format
     configmap["data"]["mesh"] = yaml.safe_dump(mesh)
     contents = yaml.safe_dump(configmap)

@@ -132,6 +132,7 @@ declare "logs" {
         `set(log.cache["ai_log"], log.attributes["ai_log"]) where (log.attributes["response_code"] == 200 or log.attributes["response_code"] == "200") and IsMap(log.attributes["ai_log"])`,
         string.format(`merge_maps(log.attributes, ExtractPatterns(log.cache["ai_log"]["chat_id"], "^(?:chatcmpl-|cmpl-)%s$"), "upsert") where IsString(log.cache["ai_log"]["chat_id"])`, vllm_pd.ids.coordinator_id_pattern),
         `keep_keys(log.attributes, ["request_id", "pd_coordinator_id", "method", "path", "response_code", "duration", "response_flags", "upstream_cluster", "upstream_host"])`,
+        `set(log.attributes["request_id_missing"], true) where not IsString(log.attributes["request_id"]) or log.attributes["request_id"] == "" or log.attributes["request_id"] == "-"`,
         `set(log.attributes["path"], Split(log.attributes["path"], "?")[0]) where IsString(log.attributes["path"])`,
         `set(log.body, Concat([log.attributes["method"], log.attributes["path"], String(log.attributes["response_code"])], " ")) where IsString(log.attributes["method"]) and IsString(log.attributes["path"]) and (IsString(log.attributes["response_code"]) or IsInt(log.attributes["response_code"]))`,
       ]

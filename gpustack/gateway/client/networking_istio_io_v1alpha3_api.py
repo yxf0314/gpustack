@@ -354,7 +354,7 @@ def get_ingress_fallback_envoyfilter(
 
 
 def configure_higress_access_log_context(
-    mesh: dict, defaults: dict, enabled: bool
+    mesh: dict, defaults: dict, *, trace_enabled: bool, log_enabled: bool
 ) -> bool:
     """Switch the bundled access-log format while preserving user formats."""
     default_format = defaults["accessLogFormat"]
@@ -363,17 +363,19 @@ def configure_higress_access_log_context(
         '"traceparent":"%REQ(TRACEPARENT):55%"',
     )
     original = (defaults["accessLogEncoding"], default_format.strip())
+    json_default = ("JSON", default_format.strip())
     traced = ("JSON", trace_format.strip())
     if not isinstance(mesh, dict) or not isinstance(mesh.get("accessLogFormat"), str):
         return False
     current = (mesh.get("accessLogEncoding"), mesh["accessLogFormat"].strip())
-    if enabled and current == original:
-        mesh.update(accessLogEncoding="JSON", accessLogFormat=trace_format)
-        return True
-    if not enabled and current == traced:
-        mesh.update(accessLogEncoding=original[0], accessLogFormat=default_format)
-        return True
-    return False
+    if current not in (original, json_default, traced):
+        return False
+    encoding = "JSON" if trace_enabled or log_enabled else original[0]
+    access_format = trace_format if trace_enabled else default_format
+    if current == (encoding, access_format.strip()):
+        return False
+    mesh.update(accessLogEncoding=encoding, accessLogFormat=access_format)
+    return True
 
 
 def get_ingress_tracing_envoyfilter(

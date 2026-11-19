@@ -427,13 +427,22 @@ def test_bundled_higress_tracing_preserves_custom_stdout_format():
 
 
 @pytest.mark.parametrize(
-    "access_log_format",
-    ["%REQ(:PATH)%", '{"path":"%REQ(:PATH)%"}', '{"path":1,"request_id":"id"}'],
+    "encoding,access_log_format",
+    [
+        ("JSON", "%REQ(:PATH)%"),
+        ("JSON", '{"path":"%REQ(:PATH)%"}'),
+        ("JSON", '{"path":1,"request_id":"id"}'),
+        ("TEXT", '{"path":"%REQ(:PATH)%","request_id":"%REQ(X-REQUEST-ID)%"}'),
+        ("TEXT", ""),
+    ],
 )
-def test_bundled_higress_log_collection_rejects_incompatible_format(access_log_format):
+def test_bundled_higress_log_collection_rejects_incompatible_format(
+    encoding, access_log_format
+):
     error = render_error(
         "--set",
-        "logging.endpoint=http://otel:4318/v1/logs",
+        "logging.endpoint=http://otel:4318/v1/logs,"
+        f"higress-core.meshConfig.accessLogEncoding={encoding}",
         "--set-literal",
         f"higress-core.meshConfig.accessLogFormat={access_log_format}",
     )

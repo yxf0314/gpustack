@@ -52,11 +52,9 @@ supplying a username and password asks for.
 {{- end }}
 {{- if include "gpustack.collectHigressLogs" . }}
 {{- $mesh := index .Values "higress-core" "meshConfig" | default dict }}
-{{- with $mesh.accessLogFormat }}
-{{- $fields := fromJson (toString .) }}
-{{- if not (and (kindIs "string" $fields.path) (kindIs "string" $fields.request_id)) }}
-{{- fail "Higress log collection requires accessLogFormat to be JSON with string path and request_id fields. Update higress-core.meshConfig.accessLogFormat or set logging.higress.enabled=false." }}
-{{- end }}
+{{- $fields := fromJson (toString ($mesh.accessLogFormat | default "")) }}
+{{- if not (and (eq (toString $mesh.accessLogEncoding) "JSON") (kindIs "string" $fields.path) (kindIs "string" $fields.request_id)) }}
+{{- fail "Higress log collection requires JSON with string path and request_id fields. Set higress-core.meshConfig.accessLogEncoding=JSON and configure accessLogFormat, or set logging.higress.enabled=false." }}
 {{- end }}
 {{- end }}
 {{- if .Values.tracing.enabled }}
