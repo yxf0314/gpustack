@@ -48,7 +48,6 @@ def test_builtin_tempo_config_and_service(tmp_path, monkeypatch):
         data_dir=str(tmp_path / "data"),
         gateway_mode="disabled",
         disable_builtin_observability=True,
-        enable_builtin_tempo=True,
         builtin_tempo_otlp_port=13417,
         builtin_tempo_http_port=13200,
     )
@@ -96,6 +95,21 @@ def test_builtin_tempo_config_and_service(tmp_path, monkeypatch):
     prepare_s6_overlay(services, [], s6_base)
     assert not service.exists()
     assert "tempo" not in prerun.ports_for_services(external).values()
+
+
+def test_disable_tracing_environment_skips_tempo_service_and_ports(
+    tmp_path, monkeypatch
+):
+    run_dir = tmp_path / "run"
+    monkeypatch.setenv("GPUSTACK_RUN_DIR", str(run_dir))
+    monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+    monkeypatch.setenv("GPUSTACK_DISABLE_TRACING", "true")
+    cfg = Config(data_dir=str(tmp_path / "data"), gateway_mode="disabled")
+
+    assert not prerun.prepare_builtin_tempo(cfg)
+    assert not (run_dir / "tempo").exists()
+    assert "tempo" not in prerun.ports_for_services(cfg).values()
+    assert cfg.effective_trace_otlp_endpoint is None
 
 
 def _one_gpustack_port(monkeypatch):
@@ -398,11 +412,9 @@ def test_embedded_gateway_reconfigures_tracing_without_replacing_existing_settin
     assert yaml.safe_load(restored["data"]["mesh"]) == mesh
 
 
-def test_embedded_gateway_uses_builtin_tempo_when_enabled(embedded_gateway):
+def test_embedded_gateway_defaults_to_builtin_tempo(embedded_gateway):
     cfg, root, _ = embedded_gateway
-    cfg = cfg.model_copy(
-        update={"advertise_address": "192.0.2.10", "enable_builtin_tempo": True}
-    )
+    cfg = cfg.model_copy(update={"advertise_address": "192.0.2.10"})
 
     prerun.prepare_gateway_config(cfg)
 

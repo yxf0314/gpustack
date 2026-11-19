@@ -154,21 +154,12 @@ def test_registration_env_var_name_matches_the_runtime_reader():
 @pytest.mark.parametrize(
     "server_url,docker,options,expected",
     [
-        ("http://server:30080", True, {}, None),
-        ("http://server:30080", True, {"enable_builtin_tempo": True}, "server:4317"),
-        (
-            "http://[2001:db8::1]:30080",
-            True,
-            {"enable_builtin_tempo": True},
-            "[2001:db8::1]:4317",
-        ),
+        ("http://server:30080", True, {}, "server:4317"),
+        ("http://[2001:db8::1]:30080", True, {}, "[2001:db8::1]:4317"),
         (
             "http://server:30080",
             True,
-            {
-                "enable_builtin_tempo": True,
-                "trace_advertise_endpoint": "remote-tempo:14431",
-            },
+            {"trace_advertise_endpoint": "remote-tempo:14431"},
             "remote-tempo:14431",
         ),
         (
@@ -193,7 +184,7 @@ def test_registration_env_var_name_matches_the_runtime_reader():
             },
             None,
         ),
-        ("http://server$(example):30080", True, {"enable_builtin_tempo": True}, None),
+        ("http://server$(example):30080", True, {}, None),
         ("http://server:30080", False, {}, None),
     ],
 )

@@ -377,7 +377,7 @@ imagePullSecrets:
 {{- if .Values.tracing.enabled -}}
 {{- if .Values.tracing.endpoint -}}
 {{- .Values.tracing.endpoint -}}
-{{- else if and .Values.server.enabled .Values.tracing.tempo.enabled -}}
+{{- else if .Values.server.enabled -}}
 {{- printf "%s.%s.svc.%s:4317" (include "gpustack.tempoName" .) .Release.Namespace .Values.clusterDomain -}}
 {{- end -}}
 {{- end -}}

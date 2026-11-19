@@ -221,7 +221,6 @@ class Config(WorkerConfig, BaseSettings):
                              the source address.
         disable_builtin_observability: Disable embedded Grafana and Prometheus services.
         disable_tracing: Disable GPUStack-managed trace export and embedded Tempo.
-        enable_builtin_tempo: Run the bundled Tempo on a Docker Server.
         trace_otlp_endpoint: OTLP/gRPC host:port for exporting traces to an external receiver.
         trace_advertise_endpoint: OTLP/gRPC host:port to include in Worker registration when the default address is unreachable from Workers.
         prometheus_url: Base URL of an external Prometheus to query. When unset, the embedded one is used if it is enabled. Set this to keep the server's own metric queries working on a deployment that delegates observability to its own stack.
@@ -386,7 +385,6 @@ class Config(WorkerConfig, BaseSettings):
     log_otlp_ca_file: Optional[str] = None
     log_pod_release: Optional[str] = None
     disable_tracing: bool = False
-    enable_builtin_tempo: bool = False
     trace_otlp_endpoint: Optional[str] = None
     trace_advertise_endpoint: Optional[str] = None
     builtin_tempo_otlp_port: int = Field(default=4317, gt=0, le=65535)
@@ -1083,8 +1081,7 @@ class Config(WorkerConfig, BaseSettings):
     def use_builtin_tempo(self) -> bool:
         """Return whether the Docker entrypoint should start its local Tempo."""
         return (
-            self.enable_builtin_tempo
-            and bool(os.getenv("GPUSTACK_RUN_DIR"))
+            bool(os.getenv("GPUSTACK_RUN_DIR"))
             and "KUBERNETES_SERVICE_HOST" not in os.environ
             and not self._is_worker()
             and not self.disable_tracing

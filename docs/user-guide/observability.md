@@ -105,13 +105,13 @@ If you already have an external Prometheus/Grafana stack, you can configure it m
 
 ## Inference Logs and Traces
 
-Use the `X-GPUStack-Request-Id` response header to look up inference logs and traces. The bundled gateway adds this header when logging or tracing is configured. Trace export requires an external receiver or an explicitly enabled built-in Tempo instance. Built-in Tempo retains traces for 24 hours by default. Log export is independent and requires a log endpoint.
+Use the `X-GPUStack-Request-Id` response header to look up inference logs and traces. The bundled gateway adds this header when logging or tracing is configured. Docker servers and Helm server releases export traces to built-in Tempo by default. Built-in Tempo retains traces for 24 hours by default. Log export is independent and requires a log endpoint.
 
 | Trace destination | Docker | Helm |
 | --- | --- | --- |
-| Built-in Tempo | Set `GPUSTACK_ENABLE_BUILTIN_TEMPO=true` on the Server | Set `tracing.tempo.enabled=true` in a Server release |
+| Built-in Tempo | Default on the Server | Default in a Server release |
 | External OTLP/gRPC receiver | Set `GPUSTACK_TRACE_OTLP_ENDPOINT` | Set `tracing.endpoint` |
-| Disabled | Leave both options unset or set `GPUSTACK_DISABLE_TRACING=true` | Leave both options unset or set `tracing.enabled=false` |
+| Disabled | Set `GPUSTACK_DISABLE_TRACING=true` | Set `tracing.enabled=false` |
 
 When log export is enabled, the Server and Workers write one JSON stream to the container console. Alloy reads that stream alongside supported engine log formats. To check for discarded records, use Alloy's `otelcol_processor_filter_logs_filtered_total` metric with the `engine_format` or `higress_format` component. The engine filter rejects standalone plain-text lines without a recognized log prefix.
 

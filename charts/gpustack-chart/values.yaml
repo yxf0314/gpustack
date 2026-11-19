@@ -109,7 +109,6 @@ tracing:
   # commands. Set this when the ingest endpoint uses DNS local to the cluster.
   advertiseEndpoint: ""
   tempo:
-    enabled: false
     retention: 24h
     storageSize: 10Gi
     # null selects the cluster's default StorageClass.
