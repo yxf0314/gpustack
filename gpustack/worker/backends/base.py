@@ -2158,14 +2158,10 @@ exec "$@"
             # Hand the operator InstanceType name to the runtime; the
             # runtime's Kubernetes deployer owns queue admission from here.
             workload.instance_type = selector.type
-        labels = pod_log_labels(
-            self._config,
-            self._model_instance,
-            self._worker.id,
-            role="router" if accelerator_free else None,
-        )
-        if labels:
-            workload.labels = {**(workload.labels or {}), **labels}
+        if get_model_instance_workloads(self._model_instance) is None:
+            labels = pod_log_labels(self._config, self._model_instance, self._worker.id)
+            if labels:
+                workload.labels = {**(workload.labels or {}), **labels}
         return transform_workload_plan(self._config, workload, self._fallback_registry)
 
 

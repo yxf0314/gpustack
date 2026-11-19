@@ -549,6 +549,18 @@ class ServeManager(ContainerLogPersister):
             "gpustack.ai/component-attempt": str(item.component.attempt),
         }
 
+    def _registered_workload_labels(
+        self, mi: ModelInstance, item: ModelInstanceWorkload
+    ) -> Dict[str, str]:
+        role = (
+            "router" if item.component and item.component.kind == "sglang_smg" else None
+        )
+        return {
+            **self._managed_workload_labels(mi),
+            **self._component_workload_labels(item),
+            **pod_log_labels(self._config, mi, self._worker_id, role=role),
+        }
+
     @staticmethod
     def _managed_launcher_available(mi, model) -> bool:
         from gpustack.utils.model_instance_workers import sglang_smg_mode
@@ -885,9 +897,7 @@ class ServeManager(ContainerLogPersister):
                     )
                 plan.labels = {
                     **(plan.labels or {}),
-                    **self._managed_workload_labels(mi),
-                    **self._component_workload_labels(item),
-                    **pod_log_labels(self._config, mi, self._worker_id),
+                    **self._registered_workload_labels(mi, item),
                 }
                 create_workload(plan)
                 if item.component is not None:
@@ -1217,9 +1227,7 @@ class ServeManager(ContainerLogPersister):
         plan = transform_workload_plan(self._config, plan, fallback)
         plan.labels = {
             **(plan.labels or {}),
-            **self._managed_workload_labels(current),
-            **self._component_workload_labels(item),
-            **pod_log_labels(self._config, current, self._worker_id, role="router"),
+            **self._registered_workload_labels(current, item),
         }
         # CPU preparation is pure and synchronous under the instance lifecycle
         # lock; a stop cannot acknowledge absence while this create is in flight.
