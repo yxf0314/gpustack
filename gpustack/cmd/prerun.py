@@ -555,7 +555,8 @@ def prepare_builtin_tempo(cfg: Config) -> bool:
             },
         )
     except OSError as exc:
-        raise RuntimeError("Unable to configure embedded Tempo") from exc
+        logger.warning("Unable to configure embedded Tempo: %s", exc)
+        return False
     return True
 
 

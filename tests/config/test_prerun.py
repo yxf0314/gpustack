@@ -1,3 +1,4 @@
+import argparse
 from pathlib import Path
 import json
 import re
@@ -111,6 +112,33 @@ def test_disable_tracing_environment_skips_tempo_service_and_ports(
     assert not (run_dir / "tempo").exists()
     assert "tempo" not in prerun.ports_for_services(cfg).values()
     assert cfg.effective_trace_otlp_endpoint is None
+
+
+def test_tempo_config_write_failure_skips_service_without_aborting_prerun(
+    tmp_path, monkeypatch, caplog
+):
+    monkeypatch.setenv("GPUSTACK_RUN_DIR", str(tmp_path / "run"))
+    monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+    cfg = Config(
+        data_dir=str(tmp_path / "data"),
+        database_url="postgresql://user:pass@database.example/db",
+        gateway_mode="disabled",
+        disable_builtin_observability=True,
+    )
+    s6_base = tmp_path / "s6-rc.d"
+    prepare_s6_overlay(["tempo"], [], s6_base)
+    monkeypatch.setattr(prerun, "parse_args", lambda args: cfg)
+    monkeypatch.setattr(prerun, "is_port_available", lambda port: True)
+
+    def fail_to_write(path, content):
+        raise PermissionError("Tempo config is not writable")
+
+    monkeypatch.setattr(prerun, "_write_yaml_atomically", fail_to_write)
+
+    prerun.run(argparse.Namespace(s6_base_path=str(s6_base)))
+
+    assert "Unable to configure embedded Tempo" in caplog.text
+    assert not (s6_base / "user" / "contents.d" / "tempo").exists()
 
 
 def _one_gpustack_port(monkeypatch):
