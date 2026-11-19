@@ -113,6 +113,8 @@ Use the `X-GPUStack-Request-Id` response header to look up inference logs and tr
 | External OTLP/gRPC receiver | Set `GPUSTACK_TRACE_OTLP_ENDPOINT` | Set `tracing.endpoint` |
 | Disabled | Leave both options unset or set `GPUSTACK_DISABLE_TRACING=true` | Leave both options unset or set `tracing.enabled=false` |
 
+When log export is enabled, the Server and Workers write one JSON stream to the container console. Alloy reads that stream alongside supported engine log formats. To check for discarded records, use Alloy's `otelcol_processor_filter_logs_filtered_total` metric with the `engine_format` or `higress_format` component. The engine filter rejects standalone plain-text lines without a recognized log prefix.
+
 Each tracing component sends spans directly to the selected receiver. The log endpoint must be reachable from the GPUStack containers that export logs. The trace endpoint must be reachable from the Server, Workers, gateways, and inference containers that export traces. The tracing connection uses plaintext gRPC, so use an address on a trusted network. Switching to an external receiver or disabling tracing stops the built-in instance. Its data remains on disk.
 
 ### Configure Docker

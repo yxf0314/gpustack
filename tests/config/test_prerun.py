@@ -468,8 +468,11 @@ def test_helm_logging_does_not_start_a_container_collector(tmp_path, collector_p
 
 def test_vllm_pd_logs_keep_native_engine_and_coordinator_ids(collector_path):
     pipeline = prerun.ALLOY_LOG_TEMPLATE.with_name("common.alloy").read_text()
+    (coordinator_pattern,) = re.findall(
+        r"value = `(\(\?P<pd_coordinator_id>[^`]+)`", pipeline
+    )
     patterns = [
-        re.compile(json.loads(literal))
+        re.compile(json.loads(literal.replace("%s", coordinator_pattern)))
         for literal in re.findall(
             r'ExtractPatterns\(log\.body, ("(?:[^"\\]|\\.)*")\)', pipeline
         )
