@@ -64,16 +64,25 @@ def test_no_prometheus_at_all_is_a_first_class_answer(tmp_path):
 @pytest.mark.parametrize(
     ("environment", "options", "expected"),
     [
-        ("docker", {}, "[2001:db8::10]:4317"),
-        ("docker", {"enable_worker": True}, "[2001:db8::10]:4317"),
-        ("docker", {"trace_otlp_endpoint": "collector:4321"}, "collector:4321"),
+        ("docker", {}, None),
+        ("docker", {"enable_builtin_tempo": True}, "[2001:db8::10]:4317"),
+        (
+            "docker",
+            {"enable_worker": True, "enable_builtin_tempo": True},
+            "[2001:db8::10]:4317",
+        ),
+        (
+            "docker",
+            {"enable_builtin_tempo": True, "trace_otlp_endpoint": "collector:4321"},
+            "collector:4321",
+        ),
         (
             "docker",
             {"trace_otlp_endpoint": "collector:4321", "disable_tracing": True},
             None,
         ),
-        ("docker", {"server_url": "http://server"}, None),
-        ("kubernetes", {}, None),
+        ("docker", {"server_url": "http://server", "enable_builtin_tempo": True}, None),
+        ("kubernetes", {"enable_builtin_tempo": True}, None),
         (
             "kubernetes",
             {"trace_otlp_endpoint": "tempo.namespace:4317"},

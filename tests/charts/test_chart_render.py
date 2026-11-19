@@ -182,7 +182,7 @@ def container_env(docs: list[dict], kind: str, name: str) -> dict[str, str]:
     pytest.fail(f"{kind}/{name} not rendered")
 
 
-@pytest.mark.parametrize("trace_mode", ["builtin", "external", "disabled"])
+@pytest.mark.parametrize("trace_mode", ["builtin", "external", "default", "disabled"])
 @pytest.mark.parametrize("logs", [False, True])
 def test_observability_endpoints_reach_server_and_workers(logs, trace_mode):
     log_endpoint = "https://logs.test:4318/v1/logs"
@@ -190,6 +190,7 @@ def test_observability_endpoints_reach_server_and_workers(logs, trace_mode):
     trace_endpoint = {
         "builtin": "gpustack-tempo.inference.svc.tenant.test:4317",
         "external": external_endpoint,
+        "default": None,
         "disabled": None,
     }[trace_mode]
     docs = render(
@@ -199,10 +200,12 @@ def test_observability_endpoints_reach_server_and_workers(logs, trace_mode):
         "worker.enabled=true,worker.gpuVendors={nvidia,amd},clusterDomain=tenant.test",
         "--set",
         f"tracing.enabled={str(trace_mode != 'disabled').lower()}",
+        "--set",
+        f"tracing.tempo.enabled={str(trace_mode == 'builtin').lower()}",
         "--set-string",
         f"logging.endpoint={log_endpoint if logs else ''}",
         "--set-string",
-        f"tracing.endpoint={external_endpoint if trace_mode != 'builtin' else ''}",
+        f"tracing.endpoint={external_endpoint if trace_mode in {'external', 'disabled'} else ''}",
     )
     for kind, name in (
         ("StatefulSet", "gpustack-server"),
@@ -220,7 +223,7 @@ def test_observability_endpoints_reach_server_and_workers(logs, trace_mode):
         assert ("gpustack-tempo" in names(docs, kind)) is (trace_mode == "builtin")
     assert "gpustack-higress-log-collector" not in names(docs, "DaemonSet")
     assert ("gpustack-otel-tracing" in names(docs, "EnvoyFilter")) is (
-        logs or trace_mode != "disabled"
+        logs or trace_mode in {"builtin", "external"}
     )
 
 
@@ -229,7 +232,8 @@ def test_bundled_tempo_uses_persistent_storage_and_a_cluster_service():
         "--namespace",
         "inference",
         "--set",
-        "tracing.tempo.storageClassName=ssd,tracing.advertiseEndpoint=trace.example:4317",
+        "tracing.tempo.enabled=true,tracing.tempo.storageClassName=ssd,"
+        "tracing.advertiseEndpoint=trace.example:4317",
     )
     tempo = {d["kind"]: d for d in docs if d["metadata"]["name"] == "gpustack-tempo"}
     service = tempo["Service"]["spec"]
@@ -346,7 +350,7 @@ def test_bundled_higress_uses_stdout_and_shared_alloy(kind, logs, traces):
         "--set",
         f"higress-core.gateway.kind={kind},higress-core.gateway.name=edge",
         "--set",
-        f"tracing.enabled={str(traces).lower()}",
+        f"tracing.tempo.enabled={str(traces).lower()}",
         "--set-string",
         f"logging.endpoint={'https://otel:4318/v1/logs' if logs else ''}",
     )
@@ -477,6 +481,8 @@ def test_bundled_higress_tracing_matches_embedded_settings(endpoint):
         "inference",
         "--set",
         f"higress-core.gateway.name=edge,tracing.enabled={str(endpoint is not None).lower()}",
+        "--set",
+        f"tracing.tempo.enabled={str(endpoint == '').lower()}",
         "--set-string",
         setting,
     )
@@ -558,7 +564,9 @@ def test_worker_only_without_a_trace_endpoint_has_no_tempo():
 
 
 def test_builtin_tracing_does_not_require_the_higress_istio_api():
-    docs = render("--set", "higress-core.global.enableIstioAPI=false")
+    docs = render(
+        "--set", "higress-core.global.enableIstioAPI=false,tracing.tempo.enabled=true"
+    )
     assert "gpustack-otel-tracing" not in names(docs, "EnvoyFilter")
     assert "gpustack-tempo" in names(docs, "StatefulSet")
     server = container_env(docs, "StatefulSet", "gpustack-server")

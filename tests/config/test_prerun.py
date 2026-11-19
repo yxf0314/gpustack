@@ -48,6 +48,7 @@ def test_builtin_tempo_config_and_service(tmp_path, monkeypatch):
         data_dir=str(tmp_path / "data"),
         gateway_mode="disabled",
         disable_builtin_observability=True,
+        enable_builtin_tempo=True,
         builtin_tempo_otlp_port=13417,
         builtin_tempo_http_port=13200,
     )
@@ -65,6 +66,7 @@ def test_builtin_tempo_config_and_service(tmp_path, monkeypatch):
         "http_listen_address": "127.0.0.1",
         "http_listen_port": 13200,
         "grpc_listen_address": "127.0.0.1",
+        "grpc_listen_port": 9095,
     }
     receiver = config["distributor"]["receivers"]["otlp"]["protocols"]
     assert receiver == {"grpc": {"endpoint": "0.0.0.0:13417"}}
@@ -75,12 +77,25 @@ def test_builtin_tempo_config_and_service(tmp_path, monkeypatch):
     }
     assert config["compactor"]["compaction"]["block_retention"] == "24h"
     assert config["ingester"]["flush_all_on_shutdown"] is True
+    assert {
+        port
+        for port, service_name in prerun.ports_for_services(cfg).items()
+        if service_name == "tempo"
+    } == {13417, 13200, 9095}
+    with pytest.raises(Exception, match="Port conflict: 9095"):
+        prerun.ports_for_services(cfg.model_copy(update={"port": 9095}))
+
+    monkeypatch.setattr(prerun, "is_port_available", lambda port: port != 13417)
+    monkeypatch.setattr(prerun, "is_port_reusable", lambda port: False)
+    with pytest.raises(Exception, match="required ports are not available"):
+        check_ports_availability(cfg, *services)
 
     external = cfg.model_copy(update={"trace_otlp_endpoint": "collector:4317"})
     active = prerun.prepare_builtin_tempo(external)
     services = prerun.determine_enabled_services(external, tempo_active=active)
     prepare_s6_overlay(services, [], s6_base)
     assert not service.exists()
+    assert "tempo" not in prerun.ports_for_services(external).values()
 
 
 def _one_gpustack_port(monkeypatch):
@@ -354,9 +369,11 @@ def test_embedded_gateway_reconfigures_tracing_without_replacing_existing_settin
     assert yaml.safe_load(restored["data"]["mesh"]) == mesh
 
 
-def test_embedded_gateway_defaults_to_builtin_tempo(embedded_gateway):
+def test_embedded_gateway_uses_builtin_tempo_when_enabled(embedded_gateway):
     cfg, root, _ = embedded_gateway
-    cfg = cfg.model_copy(update={"advertise_address": "192.0.2.10"})
+    cfg = cfg.model_copy(
+        update={"advertise_address": "192.0.2.10", "enable_builtin_tempo": True}
+    )
 
     prerun.prepare_gateway_config(cfg)
 

@@ -23,7 +23,7 @@ usage_report:
   reporting_enabled: false
 {{- end -}}
 
-{{- if and .Values.tracing.enabled .Values.server.enabled (not .Values.tracing.endpoint) }}
+{{- if and .Values.tracing.enabled .Values.server.enabled .Values.tracing.tempo.enabled (not .Values.tracing.endpoint) }}
 {{- $name := include "gpustack.tempoName" . }}
 apiVersion: v1
 kind: ConfigMap

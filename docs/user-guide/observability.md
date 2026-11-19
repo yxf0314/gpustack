@@ -105,13 +105,13 @@ If you already have an external Prometheus/Grafana stack, you can configure it m
 
 ## Inference Logs and Traces
 
-Inference responses include an `X-GPUStack-Request-Id` header. Use that ID to look up request logs and traces. Docker servers and Helm server releases enable tracing by default and store spans in a built-in Tempo instance. The default trace retention is 24 hours. Log export is independent and requires a log endpoint.
+Use the `X-GPUStack-Request-Id` response header to look up inference logs and traces. The bundled gateway adds this header when logging or tracing is configured. Trace export requires an external receiver or an explicitly enabled built-in Tempo instance. Built-in Tempo retains traces for 24 hours by default. Log export is independent and requires a log endpoint.
 
 | Trace destination | Docker | Helm |
 | --- | --- | --- |
-| Built-in Tempo | Default on the Server | Default in a release with the Server enabled |
+| Built-in Tempo | Set `GPUSTACK_ENABLE_BUILTIN_TEMPO=true` on the Server | Set `tracing.tempo.enabled=true` in a Server release |
 | External OTLP/gRPC receiver | Set `GPUSTACK_TRACE_OTLP_ENDPOINT` | Set `tracing.endpoint` |
-| Disabled | Set `GPUSTACK_DISABLE_TRACING=true` | Set `tracing.enabled=false` |
+| Disabled | Leave both options unset or set `GPUSTACK_DISABLE_TRACING=true` | Leave both options unset or set `tracing.enabled=false` |
 
 Each tracing component sends spans directly to the selected receiver. The log endpoint must be reachable from the GPUStack containers that export logs. The trace endpoint must be reachable from the Server, Workers, gateways, and inference containers that export traces. The tracing connection uses plaintext gRPC, so use an address on a trusted network. Switching to an external receiver or disabling tracing stops the built-in instance. Its data remains on disk.
 
@@ -126,7 +126,11 @@ GPUSTACK_TRACE_OTLP_ENDPOINT='<collector-host>:4317'
 
 Pass them with `docker run -e` or under `environment` in your Compose file. The log endpoint is the full OTLP/HTTP URL. The trace endpoint is an OTLP/gRPC `host:port` without a URL scheme.
 
-The built-in Tempo runs in the Server container. It stores data in the `tempo` directory under the GPUStack data directory. Independent Workers receive `GPUSTACK_TRACE_OTLP_ENDPOINT` in the platform-generated registration command. For remote Workers to use the built-in receiver, make its OTLP port (4317 by default) reachable from their trusted network. Set `GPUSTACK_TRACE_ADVERTISE_ENDPOINT` on the Server if those Workers use a different hostname or published port. Tempo's query port is bound to loopback inside the Server container.
+The built-in Tempo runs in the Server container and stores data in the `tempo` subdirectory of the GPUStack data directory. Mount that subdirectory on a separate volume with a storage limit so trace growth cannot fill the Server data volume. Retention limits the age of stored traces. Disk usage also depends on request volume and the number of spans per request.
+
+The Server checks Tempo's ingest, query, and internal gRPC ports before startup. Their defaults are 4317, 3200, and 9095. To resolve a conflict, set `GPUSTACK_BUILTIN_TEMPO_OTLP_PORT`, `GPUSTACK_BUILTIN_TEMPO_HTTP_PORT`, or `GPUSTACK_BUILTIN_TEMPO_GRPC_PORT`. The query and internal gRPC ports bind to loopback.
+
+Independent Workers receive `GPUSTACK_TRACE_OTLP_ENDPOINT` in the platform-generated registration command. For remote Workers to use the built-in receiver, make its OTLP port reachable from their trusted network. Set `GPUSTACK_TRACE_ADVERTISE_ENDPOINT` on the Server if those Workers use a different hostname or published port.
 
 GPUStack starts Alloy inside each container configured for log export. Alloy reads Server and Worker output through the Docker Logs API. Provide access to the local Docker daemon, typically with `--volume /var/run/docker.sock:/var/run/docker.sock`. Docker Workers already use this mount. The container's logging driver must support reading logs through `docker logs` and controls retention. Alloy also reads the embedded Higress access log and existing engine archives from disk.
 

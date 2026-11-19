@@ -89,7 +89,16 @@ observability_services = S6Services(
     support_pipeline=True,
 )
 log_collection_services = S6Services(S6Service("alloy"))
-trace_storage_services = S6Services(S6Service("tempo"))
+trace_storage_services = S6Services(
+    S6Service(
+        "tempo",
+        [
+            "builtin_tempo_otlp_port",
+            "builtin_tempo_http_port",
+            "builtin_tempo_grpc_port",
+        ],
+    )
+)
 
 
 def all_services() -> List[str]:

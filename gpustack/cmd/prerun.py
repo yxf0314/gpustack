@@ -141,6 +141,9 @@ def ports_for_services(cfg: Config) -> Dict[int, str]:
     if not gateway_disabled:
         ports[cfg.api_port] = gpustack_service_name
 
+    if cfg.use_builtin_tempo():
+        trace_storage_services.set_ports(cfg, ports)
+
     return ports
 
 
@@ -501,6 +504,7 @@ def prepare_builtin_tempo(cfg: Config) -> bool:
                     "http_listen_address": loopback,
                     "http_listen_port": cfg.builtin_tempo_http_port,
                     "grpc_listen_address": loopback,
+                    "grpc_listen_port": cfg.builtin_tempo_grpc_port,
                 },
                 "distributor": {
                     "receivers": {
@@ -530,8 +534,7 @@ def prepare_builtin_tempo(cfg: Config) -> bool:
             },
         )
     except OSError as exc:
-        logger.warning("Unable to configure embedded Tempo: %s", exc)
-        return False
+        raise RuntimeError("Unable to configure embedded Tempo") from exc
     return True
 
 

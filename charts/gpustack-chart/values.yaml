@@ -102,13 +102,14 @@ logging:
     key: ca.crt
 tracing:
   enabled: true
-  # External OTLP/gRPC host:port. Leave empty to use Tempo in a server release.
+  # External OTLP/gRPC host:port. Takes precedence over built-in Tempo.
   # A worker-only release needs a supplied endpoint to export traces.
   endpoint: ""
   # Optional OTLP/gRPC address handed out by the server in Worker registration
   # commands. Set this when the ingest endpoint uses DNS local to the cluster.
   advertiseEndpoint: ""
   tempo:
+    enabled: false
     retention: 24h
     storageSize: 10Gi
     # null selects the cluster's default StorageClass.
