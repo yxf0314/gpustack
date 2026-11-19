@@ -62,29 +62,29 @@ def pinned_operator_version() -> tuple[int, ...]:
 
 
 @pytest.fixture(scope="module", autouse=True)
-def chart_dependencies():
-    """Vendor the chart's dependencies, which every render needs.
+def chart_dependencies(tmp_path_factory):
+    """Prepare dependencies without modifying the checkout's vendored archive.
 
     `helm template` resolves dependencies while loading the chart — before any
     value is read — so a missing `charts/` fails every render here regardless of
-    what the test asks for, including the ones whose sub-charts are conditioned
-    off. The directory is generated, not committed, so a fresh checkout and a CI
-    runner both start without it.
+    what the test asks for, including when its sub-charts are disabled.
 
     `dependency update` rather than `build`: the lock file is not tracked either,
     and `build` refuses a repository that was never `helm repo add`-ed, which is
     the normal state of a runner.
     """
-    chart = yaml.safe_load((CHART_DIR / "Chart.yaml").read_text())
+    render_path = tmp_path_factory.mktemp("helm-chart") / CHART_DIR.name
+    shutil.copytree(CHART_DIR, render_path)
+    chart = yaml.safe_load((render_path / "Chart.yaml").read_text())
     wanted = [d["name"] for d in chart.get("dependencies") or []]
-    vendored = {path.name for path in (CHART_DIR / "charts").glob("*")}
+    vendored = {path.name for path in (render_path / "charts").glob("*")}
     missing = [
         name for name in wanted if not any(entry.startswith(name) for entry in vendored)
     ]
     if missing:
         try:
             result = subprocess.run(
-                [HELM, "dependency", "update", CHART],
+                [HELM, "dependency", "update", str(render_path)],
                 capture_output=True,
                 text=True,
                 timeout=600,
@@ -99,8 +99,13 @@ def chart_dependencies():
                 f"{detail[-1] if detail else 'helm dependency update failed'}"
             )
     subprocess.run(
-        [sys.executable, "hack/prepare-helm-chart.py", CHART], check=True, timeout=30
+        [sys.executable, "hack/prepare-helm-chart.py", str(render_path)],
+        check=True,
+        timeout=30,
     )
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(sys.modules[__name__], "CHART", str(render_path))
+        yield
 
 
 # Every render has to name the gpustack image: `image.tag` is deliberately
