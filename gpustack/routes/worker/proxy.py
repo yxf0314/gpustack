@@ -31,6 +31,7 @@ from gpustack.observability.tracing import (
     inject_trace_context,
     set_span_error,
     trace_inference_http,
+    trace_log_fields,
 )
 from gpustack.utils.network import use_proxy_env_for_url
 from gpustack.utils.stall import stall_error_sse
@@ -126,6 +127,8 @@ async def _stream_body(
     body_iter: AsyncIterator[bytes],
     first_chunk: Optional[bytes],
     idle_timeout: Optional[float],
+    *,
+    log_context: Optional[dict] = None,
 ) -> AsyncIterator[bytes]:
     """Stream the response body, bounding the gap between chunks.
 
@@ -154,8 +157,10 @@ async def _stream_body(
         except (asyncio.TimeoutError, TimeoutError):
             set_span_error(current_inference_span(), "timeout")
             logger.error(
-                f"Upstream stopped sending data for {idle_timeout}s mid-stream, "
-                "terminating the response with an error event"
+                "Upstream stopped sending data for %ss mid-stream, "
+                "terminating the response with an error event",
+                idle_timeout,
+                extra={**(log_context or {}), **trace_log_fields()},
             )
             yield stall_error_sse()
             return
@@ -268,6 +273,10 @@ async def proxy(path: str, request: Request):  # noqa: C901
         span = current_inference_span()
         inject_trace_context(headers, span)
         target_instance_id = getattr(request.state, "x_target_instance_id", None)
+        log_context = {
+            "request_id": inference_request_id(request.headers),
+            "model_instance_id": target_instance_id,
+        }
         if span.is_recording() and target_instance_id:
             span.set_attribute("gpustack.model_instance_id", int(target_instance_id))
         # Read the header while popping it: aiohttp sets its own framing, and
@@ -380,6 +389,7 @@ async def proxy(path: str, request: Request):  # noqa: C901
                     body_iter,
                     first_chunk,
                     envs.PROXY_STREAM_IDLE_TIMEOUT if streaming else None,
+                    log_context=log_context,
                 ):
                     yield chunk
             finally:

@@ -27,6 +27,7 @@ from gpustack import envs
 from gpustack.api.auth import worker_proxy_auth
 from gpustack.api.exceptions import register_handlers
 from gpustack.gateway.utils import router_header_key
+from gpustack.logging import _ApplicationLogFormatter
 from gpustack.routes.worker import proxy as worker_proxy
 from gpustack.utils.stall import stall_error_sse
 
@@ -196,10 +197,11 @@ def _build_worker_app(port: int, instance_id: Optional[int] = None) -> FastAPI:
         (True, [(0, None)], 504, "504"),
         (True, [(0, b"data: token\n\n"), (0, None)], 200, "timeout"),
         (False, [(0, b"data: [DONE]\n\n")], 200, None),
+        (False, [(0, b"data: token\n\n"), (0, None)], 200, "timeout"),
     ],
 )
 async def test_worker_trace_reaches_engine_and_covers_proxy_stream(
-    monkeypatch, trace_enabled, steps, expected_status, error
+    monkeypatch, caplog, trace_enabled, steps, expected_status, error
 ):
     req_id = "00112233-4455-4677-8899-aabbccddeeff"
     trace_id = "a" * 32
@@ -208,7 +210,8 @@ async def test_worker_trace_reaches_engine_and_covers_proxy_stream(
     provider = TracerProvider(shutdown_on_exit=False)
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     app = _build_worker_app(9900, instance_id=7)
-    app.add_middleware(worker_proxy.WorkerProxyTracingMiddleware)
+    if trace_enabled:
+        app.add_middleware(worker_proxy.WorkerProxyTracingMiddleware)
     tracer = provider.get_tracer(__name__)
     app.state.inference_tracer = tracer if trace_enabled else None
     monkeypatch.setattr(envs, "PROXY_TTFT_TIMEOUT", 0.02)
@@ -244,6 +247,15 @@ async def test_worker_trace_reaches_engine_and_covers_proxy_stream(
     upstream.close.assert_called()
     headers = session.request.await_args.kwargs["headers"]
     assert headers["x-request-id"] == req_id
+    if error == "timeout":
+        assert response.content.endswith(stall_error_sse())
+        (record,) = (
+            record for record in caplog.records if "mid-stream" in record.getMessage()
+        )
+        exported = json.loads(_ApplicationLogFormatter("worker").format(record))
+        assert exported["request_id"] == req_id
+        assert exported["model_instance_id"] == 7
+        assert ("trace_id" in exported) is trace_enabled
     spans = [s for s in exporter.get_finished_spans() if s.name != "extension"]
     if not trace_enabled:
         assert spans == []
