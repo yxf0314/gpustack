@@ -88,6 +88,9 @@ spec:
             {{- end }}
             - name: GPUSTACK_LOG_OTLP_ENDPOINT
               value: {{ .Values.logging.endpoint | quote }}
+            - name: GPUSTACK_LOG_REDACT_PATTERNS
+              {{- /* Keep Kubernetes from expanding $(VAR) inside a pattern. */}}
+              value: {{ .Values.logging.redactPatterns | mustToJson | replace "$" "\\u0024" | quote }}
             {{- with (include "gpustack.loggingAuthorizationEnv" . | trim) }}
             {{- . | nindent 12 }}
             {{- end }}

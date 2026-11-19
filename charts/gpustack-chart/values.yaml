@@ -89,6 +89,8 @@ image:
 logging:
   # Full OTLP/HTTP logs URL, including /v1/logs. Empty disables export.
   endpoint: ""
+  # RE2 patterns to replace with *** in exported log bodies, stack traces, and paths.
+  redactPatterns: []
   higress:
     # Disable when another agent already collects the bundled gateway's stdout.
     enabled: true

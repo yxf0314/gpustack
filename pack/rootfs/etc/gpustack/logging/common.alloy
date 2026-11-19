@@ -20,6 +20,16 @@ declare "logs" {
     optional = false
   }
 
+  argument "redact_pattern" {
+    optional = true
+    // Scope each rule's flags. With no rules, a word boundary and its
+    // negation cannot both match.
+    default = "(?:" + coalesce(
+      string.join(encoding.from_json(coalesce(sys.env("GPUSTACK_LOG_REDACT_PATTERNS"), "[]")), ")|(?:"),
+      `\A\b\B`,
+    ) + ")"
+  }
+
   export "application" {
     value = otelcol.processor.transform.application.input
   }
@@ -30,6 +40,22 @@ declare "logs" {
 
   export "engine" {
     value = otelcol.processor.filter.engine_format.input
+  }
+
+  otelcol.processor.transform "redact" {
+    error_mode = "propagate"
+
+    statements {
+      log = [
+        string.format(`replace_pattern(log.body, %q, "***") where IsString(log.body)`, argument.redact_pattern.value),
+        string.format(`replace_pattern(log.attributes["exception.stacktrace"], %q, "***") where IsString(log.attributes["exception.stacktrace"])`, argument.redact_pattern.value),
+        string.format(`replace_pattern(log.attributes["path"], %q, "***") where IsString(log.attributes["path"])`, argument.redact_pattern.value),
+      ]
+    }
+
+    output {
+      logs = [otelcol.exporter.otlphttp.logs.input]
+    }
   }
 
   otelcol.exporter.otlphttp "logs" {
@@ -108,7 +134,7 @@ declare "logs" {
     keys = ["service.name"]
 
     output {
-      logs = [otelcol.exporter.otlphttp.logs.input]
+      logs = [otelcol.processor.transform.redact.input]
     }
   }
 
@@ -166,7 +192,7 @@ declare "logs" {
     }
 
     output {
-      logs = [otelcol.exporter.otlphttp.logs.input]
+      logs = [otelcol.processor.transform.redact.input]
     }
   }
 
@@ -238,7 +264,7 @@ declare "logs" {
     }
 
     output {
-      logs = [otelcol.exporter.otlphttp.logs.input]
+      logs = [otelcol.processor.transform.redact.input]
     }
   }
 }

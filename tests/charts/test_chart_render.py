@@ -11,6 +11,7 @@ fetched, so neither a machine without helm nor an outage at somebody else's
 chart repository turns this suite red.
 """
 
+import json
 import pathlib
 import shutil
 import subprocess
@@ -309,6 +310,23 @@ def test_logging_references_existing_secrets():
         "secretName": "logs-ca",
         "items": [{"key": "ca.crt", "path": "ca.crt"}],
     }
+
+
+@pytest.mark.parametrize(
+    "patterns",
+    [[], [r"\b1[3-9][0-9]{9}\b", r'(?i)"email"\s*:', r"\Q$(POD_NAMESPACE)\E"]],
+)
+def test_logging_redaction_patterns_reach_alloy(patterns):
+    docs = render(
+        "--set-string",
+        "logging.endpoint=http://collector:4318/v1/logs",
+        "--set-json",
+        f"logging.redactPatterns={json.dumps(patterns)}",
+    )
+    alloy = container_env(docs, "Deployment", "gpustack-alloy")
+    value = alloy["GPUSTACK_LOG_REDACT_PATTERNS"]
+    assert "$(POD_NAMESPACE)" not in value
+    assert json.loads(value) == patterns
 
 
 def test_legacy_higress_log_collection_values_do_not_mount_host_logs():
