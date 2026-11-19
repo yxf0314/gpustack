@@ -220,6 +220,7 @@ class Config(WorkerConfig, BaseSettings):
                              entry the gateway appended is trusted, so forwarded headers cannot spoof
                              the source address.
         disable_builtin_observability: Disable embedded Grafana and Prometheus services.
+        log_otlp_endpoint: Full OTLP/HTTP logs URL to enable structured log collection and export.
         disable_tracing: Disable GPUStack-managed trace export and embedded Tempo.
         trace_otlp_endpoint: OTLP/gRPC host:port for exporting traces to an external receiver.
         trace_advertise_endpoint: OTLP/gRPC host:port to include in Worker registration when the default address is unreachable from Workers.

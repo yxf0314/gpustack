@@ -1,3 +1,4 @@
+import argparse
 import json
 from pathlib import Path
 
@@ -5,7 +6,8 @@ from starlette.requests import Request
 import pytest
 from pydantic import ValidationError
 
-from gpustack.cmd.prerun import prepare_observability_config
+from gpustack.cmd.prerun import prepare_observability_config, setup_prerun_cmd
+from gpustack.cmd.start import parse_args, set_common_options, setup_start_cmd
 from gpustack.config.config import Config
 from gpustack.routes import prometheus as prometheus_routes
 
@@ -110,6 +112,86 @@ def test_effective_trace_endpoint(
 def test_trace_endpoint_validation(tmp_path, field, value):
     with pytest.raises(ValidationError, match=field):
         Config(data_dir=str(tmp_path / "data"), **{field: value})
+
+
+def _parse_cli(subcommand: str, argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    setup_start_cmd(subparsers)
+    setup_prerun_cmd(subparsers)
+    return parser.parse_args([subcommand, *argv])
+
+
+@pytest.mark.parametrize("subcommand", ["start", "prerun"])
+@pytest.mark.parametrize(
+    ("flag", "attr", "env_name", "flag_value", "env_value"),
+    [
+        (
+            "--trace-otlp-endpoint",
+            "trace_otlp_endpoint",
+            "GPUSTACK_TRACE_OTLP_ENDPOINT",
+            "collector.cli:4317",
+            "collector.env:4317",
+        ),
+        (
+            "--log-otlp-endpoint",
+            "log_otlp_endpoint",
+            "GPUSTACK_LOG_OTLP_ENDPOINT",
+            "http://collector.cli:4318/v1/logs",
+            "http://collector.env:4318/v1/logs",
+        ),
+    ],
+)
+def test_otlp_endpoint_cli_flags_and_env_precedence(
+    monkeypatch, subcommand, flag, attr, env_name, flag_value, env_value
+):
+    monkeypatch.delenv(env_name, raising=False)
+    assert getattr(_parse_cli(subcommand, []), attr) is None
+    assert getattr(_parse_cli(subcommand, [flag, flag_value]), attr) == flag_value
+
+    monkeypatch.setenv(env_name, env_value)
+    assert getattr(_parse_cli(subcommand, []), attr) == env_value
+    assert getattr(_parse_cli(subcommand, [flag, flag_value]), attr) == flag_value
+
+
+def test_otlp_endpoint_cli_flags_reach_config_and_preserve_yaml(tmp_path, monkeypatch):
+    for name in (
+        "GPUSTACK_DISABLE_TRACING",
+        "GPUSTACK_TRACE_OTLP_ENDPOINT",
+        "GPUSTACK_LOG_OTLP_ENDPOINT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("GPUSTACK_RUN_DIR", str(tmp_path / "run"))
+    monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+
+    cfg = parse_args(
+        _parse_cli(
+            "start",
+            [
+                "--data-dir",
+                str(tmp_path / "data"),
+                "--gateway-mode",
+                "disabled",
+                "--trace-otlp-endpoint",
+                "collector.example:4317",
+                "--log-otlp-endpoint",
+                "http://collector.example:4318/v1/logs",
+            ],
+        )
+    )
+    assert cfg.trace_otlp_endpoint == "collector.example:4317"
+    assert cfg.effective_trace_otlp_endpoint == "collector.example:4317"
+    assert cfg.log_otlp_endpoint == "http://collector.example:4318/v1/logs"
+
+    yaml_data = {
+        "data_dir": str(tmp_path / "yaml-data"),
+        "trace_otlp_endpoint": "yaml-collector:4317",
+        "log_otlp_endpoint": "http://yaml-collector:4318/v1/logs",
+    }
+    set_common_options(_parse_cli("start", []), yaml_data)
+    yaml_cfg = Config(**yaml_data)
+    assert yaml_cfg.trace_otlp_endpoint == "yaml-collector:4317"
+    assert yaml_cfg.log_otlp_endpoint == "http://yaml-collector:4318/v1/logs"
 
 
 def test_incluster_gateway_scrape_job_uses_pod_discovery(tmp_path, monkeypatch):

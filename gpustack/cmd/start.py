@@ -361,6 +361,18 @@ def start_cmd_options(parser_server: argparse.ArgumentParser):
         help="Disable GPUStack-managed trace export and embedded Tempo.",
         default=get_gpustack_env_bool("DISABLE_TRACING"),
     )
+    common_group.add_argument(
+        "--trace-otlp-endpoint",
+        type=str,
+        help="OTLP/gRPC host:port for exporting traces to an external receiver. Overrides embedded Tempo when set.",
+        default=get_gpustack_env("TRACE_OTLP_ENDPOINT"),
+    )
+    common_group.add_argument(
+        "--log-otlp-endpoint",
+        type=str,
+        help="Full OTLP/HTTP logs URL (e.g. http://<collector-host>:4318/v1/logs) to enable structured log collection and export.",
+        default=get_gpustack_env("LOG_OTLP_ENDPOINT"),
+    )
     server_group.add_argument(
         "--disable-builtin-observability",
         action=OptionalBoolAction,
@@ -953,6 +965,8 @@ def set_common_options(args, config_data: dict):
         "service_discovery_name",
         "namespace",
         "disable_tracing",
+        "trace_otlp_endpoint",
+        "log_otlp_endpoint",
     ]
 
     for option in options:
