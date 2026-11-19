@@ -125,8 +125,6 @@ function package_chart() {
     fi
   fi
 
-  uv run --no-sync python "${ROOT_DIR}/hack/prepare-helm-chart.py" "${chart_path}"
-
   rm -rf "${target_dir}"
   mkdir -p "${target_dir}"
 

@@ -275,7 +275,39 @@ higress-core:
     idleTimeout: 1800
   upstream:
     idleTimeout: 3
+  meshConfig:
+    accessLogEncoding: JSON
+    accessLogFormat: >-
+      {"ai_log":"%FILTER_STATE(wasm.ai_log:PLAIN)%",
+      "authority":"%REQ(X-ENVOY-ORIGINAL-HOST?:AUTHORITY)%",
+      "bytes_received":"%BYTES_RECEIVED%",
+      "bytes_sent":"%BYTES_SENT%",
+      "downstream_local_address":"%DOWNSTREAM_LOCAL_ADDRESS%",
+      "downstream_remote_address":"%DOWNSTREAM_REMOTE_ADDRESS%",
+      "duration":"%DURATION%",
+      "istio_policy_status":"%DYNAMIC_METADATA(istio.mixer:status)%",
+      "method":"%REQ(:METHOD)%",
+      "path":"%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%",
+      "protocol":"%PROTOCOL%",
+      "request_id":"%REQ(X-REQUEST-ID)%",
+      "requested_server_name":"%REQUESTED_SERVER_NAME%",
+      "response_code":"%RESPONSE_CODE%",
+      "response_flags":"%RESPONSE_FLAGS%",
+      "route_name":"%ROUTE_NAME%",
+      "start_time":"%START_TIME%",
+      "trace_id":"%REQ(X-B3-TRACEID)%",
+      "traceparent":"%REQ(TRACEPARENT):55%",
+      "upstream_cluster":"%UPSTREAM_CLUSTER%",
+      "upstream_host":"%UPSTREAM_HOST%",
+      "upstream_local_address":"%UPSTREAM_LOCAL_ADDRESS%",
+      "upstream_service_time":"%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%",
+      "upstream_transport_failure_reason":"%UPSTREAM_TRANSPORT_FAILURE_REASON%",
+      "user_agent":"%REQ(USER-AGENT)%",
+      "x_forwarded_for":"%REQ(X-FORWARDED-FOR)%",
+      "response_code_details":"%RESPONSE_CODE_DETAILS%"}
   gateway:
+    podLabels:
+      gpustack.ai/log-source: higress
     # Empty string (not null): a literal `null` in a values file no longer
     # overrides the subchart's default under Helm v4's coalesce semantics
     # (only `--set ...=null` deletes). "" reliably falls through to

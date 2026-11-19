@@ -64,8 +64,6 @@ spec:
             {{- if index .Values "higress-core" "enabled" }}
             - name: GPUSTACK_GATEWAY_NAMESPACE
               value: "{{ .Release.Namespace }}"
-            - name: GPUSTACK_HELM_BUNDLED_HIGRESS
-              value: "true"
             {{- else if .Values.gateway.namespace }}
             - name: GPUSTACK_GATEWAY_NAMESPACE
               value: "{{ .Values.gateway.namespace }}"

@@ -98,11 +98,6 @@ def chart_dependencies(tmp_path_factory):
                 f"chart dependencies unavailable ({', '.join(missing)}): "
                 f"{detail[-1] if detail else 'helm dependency update failed'}"
             )
-    subprocess.run(
-        [sys.executable, "hack/prepare-helm-chart.py", str(render_path)],
-        check=True,
-        timeout=30,
-    )
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr(sys.modules[__name__], "CHART", str(render_path))
         yield
@@ -354,7 +349,7 @@ def test_bundled_higress_uses_stdout_and_shared_alloy(kind, logs, traces):
         "--set-string",
         f"logging.endpoint={'https://otel:4318/v1/logs' if logs else ''}",
     )
-    gateway = next(
+    (gateway,) = (
         doc for doc in docs if doc["kind"] == kind and doc["metadata"]["name"] == "edge"
     )
     template = gateway["spec"]["template"]
@@ -362,16 +357,19 @@ def test_bundled_higress_uses_stdout_and_shared_alloy(kind, logs, traces):
         "higress-gateway"
     ]
     labels = template["metadata"]["labels"]
-    assert labels.get("gpustack.ai/log-source") == ("higress" if logs else None)
-    assert labels.get("gpustack.ai/log-release") == ("gpustack" if logs else None)
+    assert labels.get("gpustack.ai/log-source") == "higress"
+    assert "gpustack.ai/log-release" not in labels
 
-    higress_config = next(
+    (higress_config,) = (
         doc for doc in docs if doc["metadata"]["name"] == "higress-config"
     )
     mesh = yaml.safe_load(higress_config["data"]["mesh"])
     assert mesh["accessLogFile"] == "/dev/stdout"
-    assert mesh["accessLogEncoding"] == ("JSON" if logs or traces else "TEXT")
-    assert ("traceparent" in yaml.safe_load(mesh["accessLogFormat"])) is traces
+    assert mesh["accessLogEncoding"] == "JSON"
+    assert (
+        yaml.safe_load(mesh["accessLogFormat"])["traceparent"]
+        == "%REQ(TRACEPARENT):55%"
+    )
     assert "gpustack-higress-file-log" not in names(docs, "EnvoyFilter")
     assert ("gpustack-alloy" in names(docs, "Deployment")) is logs
     if not logs:
@@ -385,6 +383,12 @@ def test_bundled_higress_uses_stdout_and_shared_alloy(kind, logs, traces):
     assert alloy["spec"]["strategy"]["type"] == "Recreate"
     alloy_pod = alloy["spec"]["template"]["spec"]
     assert alloy_pod["serviceAccountName"] == "gpustack-alloy"
+    assert (
+        container_env(docs, "Deployment", "gpustack-alloy")[
+            "GPUSTACK_LOG_HIGRESS_SELECTOR"
+        ]
+        == "edge;inference-edge"
+    )
     assert all("hostPath" not in volume for volume in alloy_pod["volumes"])
     role = next(
         doc
@@ -405,14 +409,8 @@ def test_existing_gateway_agent_can_disable_only_gateway_collection():
         "worker.enabled=true,logging.higress.enabled=false,"
         "logging.endpoint=http://otel:4318/v1/logs",
     )
-    gateway = next(
-        doc
-        for doc in docs
-        if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "higress-gateway"
-    )
-    assert (
-        "gpustack.ai/log-source"
-        not in gateway["spec"]["template"]["metadata"]["labels"]
+    assert "GPUSTACK_LOG_HIGRESS_SELECTOR" not in container_env(
+        docs, "Deployment", "gpustack-alloy"
     )
     assert "gpustack-alloy" in names(docs, "Deployment")
     for kind, name in (
@@ -426,7 +424,7 @@ def test_bundled_higress_tracing_preserves_custom_stdout_format():
     docs = render(
         "--set",
         "tracing.endpoint=otel:4317,logging.endpoint=http://otel:4318/v1/logs,"
-        "logging.higress.enabled=false",
+        "logging.higress.enabled=false,higress-core.meshConfig.accessLogEncoding=TEXT",
         "--set-string",
         "higress-core.meshConfig.accessLogFormat=%REQ(:METHOD)%",
     )
@@ -545,12 +543,6 @@ def test_bundled_higress_tracing_matches_embedded_settings(endpoint):
         tracing["spec"]["workloadSelector"]["labels"]
         == gateway["spec"]["selector"]["matchLabels"]
     )
-    assert (
-        container_env(docs, "StatefulSet", "gpustack-server")[
-            "GPUSTACK_HELM_BUNDLED_HIGRESS"
-        ]
-        == "true"
-    )
 
 
 def test_existing_gateway_and_worker_only_telemetry():
@@ -567,8 +559,10 @@ def test_existing_gateway_and_worker_only_telemetry():
     server = container_env(docs, "StatefulSet", "gpustack-server")
     assert server["GPUSTACK_TRACE_OTLP_ENDPOINT"] == endpoint
     assert server["GPUSTACK_GATEWAY_NAMESPACE"] == "gateway"
-    assert "GPUSTACK_HELM_BUNDLED_HIGRESS" not in server
     assert "gpustack-otel-tracing" not in names(docs, "EnvoyFilter")
+    assert "GPUSTACK_LOG_HIGRESS_SELECTOR" not in container_env(
+        docs, "Deployment", "gpustack-alloy"
+    )
     assert "gpustack-higress-file-log" not in names(docs, "EnvoyFilter")
     assert "gpustack-higress-collector" not in names(docs, "ConfigMap")
     assert "gpustack-tempo" not in names(docs, "StatefulSet")

@@ -53,9 +53,8 @@ helm install -n gpustack-system gpustack-server oci://registry-1.docker.io/gpust
   --version <chart-version>
 ```
 
-For a source checkout, run `helm dependency update charts/gpustack-chart` and
-`python3 hack/prepare-helm-chart.py charts/gpustack-chart` before rendering or
-packaging the chart.
+For a source checkout, run `helm dependency update charts/gpustack-chart`
+before rendering or packaging the chart.
 
 By default, the `higress-core` sub-chart is enabled and deployed alongside GPUStack. If you already have Higress installed in your cluster, disable the bundled Higress and point GPUStack to your existing instance:
 

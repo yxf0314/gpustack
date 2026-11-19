@@ -19,16 +19,26 @@ discovery.kubernetes "pods" {
 
   selectors {
     role = "pod"
-    label = "gpustack.ai/log-release=" + sys.env("GPUSTACK_LOG_POD_RELEASE")
+    label = "gpustack.ai/log-source in (application,engine,higress)"
+  }
+}
+
+discovery.relabel "release" {
+  targets = discovery.kubernetes.pods.targets
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_label_gpustack_ai_log_release"]
+    regex = sys.env("GPUSTACK_LOG_POD_RELEASE_PATTERN")
+    action = "keep"
   }
 }
 
 discovery.relabel "application" {
-  targets = discovery.kubernetes.pods.targets
+  targets = discovery.relabel.release.output
 
   rule {
     source_labels = ["__meta_kubernetes_pod_label_gpustack_ai_log_source", "__meta_kubernetes_pod_container_name"]
-    regex = "application;" + sys.env("GPUSTACK_LOG_POD_RELEASE") + "-(server|worker)"
+    regex = "application;" + sys.env("GPUSTACK_LOG_POD_RELEASE_PATTERN") + "-(server|worker)"
     action = "keep"
   }
 }
@@ -37,14 +47,14 @@ discovery.relabel "higress" {
   targets = discovery.kubernetes.pods.targets
 
   rule {
-    source_labels = ["__meta_kubernetes_pod_label_gpustack_ai_log_source", "__meta_kubernetes_pod_container_name"]
-    regex = "higress;higress-gateway"
+    source_labels = ["__meta_kubernetes_pod_label_gpustack_ai_log_source", "__meta_kubernetes_pod_container_name", "__meta_kubernetes_pod_label_app", "__meta_kubernetes_pod_label_higress"]
+    regex = "higress;higress-gateway;" + sys.env("GPUSTACK_LOG_HIGRESS_SELECTOR")
     action = "keep"
   }
 }
 
 discovery.relabel "engine" {
-  targets = discovery.kubernetes.pods.targets
+  targets = discovery.relabel.release.output
 
   rule {
     source_labels = ["__meta_kubernetes_pod_label_gpustack_ai_log_source"]

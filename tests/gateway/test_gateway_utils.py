@@ -1,13 +1,8 @@
-from gpustack.gateway import (
-    ensure_bundled_gateway_log_context,
-    generic_proxy_router_spec_diff,
-)
+from gpustack.gateway import generic_proxy_router_spec_diff
 import re
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import yaml
 from kubernetes_asyncio import client as k8s_client
 from kubernetes_asyncio.client import ApiException
 
@@ -49,70 +44,6 @@ from gpustack.gateway.client.networking_higress_io_v1_api import (
     McpBridgeRegistry,
 )
 from gpustack.server.bus import EventType
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "initial,enabled,expected",
-    [
-        ("default", True, "traced"),
-        ("traced", False, "default"),
-        ("traced", True, None),
-        ("default", False, None),
-        ("custom", True, None),
-        ("custom", False, None),
-    ],
-)
-async def test_bundled_gateway_log_context(
-    tmp_path, monkeypatch, initial, enabled, expected
-):
-    default_format = '{"trace_id":"%REQ(X-B3-TRACEID)%","method":"%REQ(:METHOD)%"}'
-    formats = {
-        "default": {"accessLogEncoding": "TEXT", "accessLogFormat": default_format},
-        "traced": {
-            "accessLogEncoding": "JSON",
-            "accessLogFormat": '{"traceparent":"%REQ(TRACEPARENT):55%","method":"%REQ(:METHOD)%"}',
-        },
-        "custom": {"accessLogEncoding": "TEXT", "accessLogFormat": "%REQ(:METHOD)%"},
-    }
-    defaults = tmp_path / "configmaps/higress-config.yaml"
-    defaults.parent.mkdir()
-    defaults.write_text(
-        yaml.safe_dump({"data": {"mesh": yaml.safe_dump(formats["default"])}})
-    )
-    monkeypatch.setattr("gpustack.gateway.HIGRESS_DEFAULT_CONFIG", tmp_path)
-    client = AsyncMock()
-    client.read_namespaced_config_map.return_value = k8s_client.V1ConfigMap(
-        metadata=k8s_client.V1ObjectMeta(resource_version="42"),
-        data={
-            "mesh": yaml.safe_dump(
-                {**formats[initial], "accessLogFile": "/dev/stdout"}
-            ),
-            "higress": "preserve controller config",
-        },
-    )
-    monkeypatch.setattr("gpustack.gateway.k8s_client.CoreV1Api", lambda **_: client)
-    cfg = SimpleNamespace(
-        gateway_namespace="inference",
-        effective_trace_otlp_endpoint="collector:4317" if enabled else None,
-    )
-
-    await ensure_bundled_gateway_log_context(cfg, api_client=None)
-
-    if expected is None:
-        client.patch_namespaced_config_map.assert_not_awaited()
-    else:
-        client.patch_namespaced_config_map.assert_awaited_once()
-        patch = client.patch_namespaced_config_map.await_args.kwargs
-        assert patch["name"] == "higress-config"
-        assert patch["namespace"] == "inference"
-        assert patch["_content_type"] == "application/merge-patch+json"
-        assert patch["body"]["metadata"] == {"resourceVersion": "42"}
-        assert set(patch["body"]["data"]) == {"mesh"}
-        assert yaml.safe_load(patch["body"]["data"]["mesh"]) == {
-            **formats[expected],
-            "accessLogFile": "/dev/stdout",
-        }
 
 
 def test_flattened_prefixes():

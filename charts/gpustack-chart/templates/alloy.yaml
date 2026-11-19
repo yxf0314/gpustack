@@ -76,8 +76,16 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            - name: GPUSTACK_LOG_POD_RELEASE
-              value: {{ .Release.Name | quote }}
+            - name: GPUSTACK_LOG_POD_RELEASE_PATTERN
+              value: {{ .Release.Name | regexQuoteMeta | quote }}
+            {{- if include "gpustack.collectHigressLogs" . }}
+            {{- $selector := include "gateway.selectorLabels" (index .Subcharts "higress-core") | fromYaml }}
+            {{- if not (or $selector.app $selector.higress) }}
+            {{- fail "Higress log collection requires the bundled gateway's app or higress selector label." }}
+            {{- end }}
+            - name: GPUSTACK_LOG_HIGRESS_SELECTOR
+              value: {{ printf "%s;%s" (get $selector "app" | regexQuoteMeta) (get $selector "higress" | regexQuoteMeta) | quote }}
+            {{- end }}
             - name: GPUSTACK_LOG_OTLP_ENDPOINT
               value: {{ .Values.logging.endpoint | quote }}
             {{- with (include "gpustack.loggingAuthorizationEnv" . | trim) }}
