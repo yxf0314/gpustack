@@ -224,6 +224,8 @@ class Config(WorkerConfig, BaseSettings):
         disable_tracing: Disable GPUStack-managed trace export and embedded Tempo.
         trace_otlp_endpoint: OTLP/gRPC host:port for exporting traces to an external receiver.
         trace_advertise_endpoint: OTLP/gRPC host:port to include in Worker registration when the default address is unreachable from Workers.
+        trace_query_url: Base HTTP URL for querying traces from Tempo.
+        log_grafana_datasource_uid: UID of the Loki data source used by request log links in Grafana.
         prometheus_url: Base URL of an external Prometheus to query. When unset, the embedded one is used if it is enabled. Set this to keep the server's own metric queries working on a deployment that delegates observability to its own stack.
         grafana_url: Base URL for Grafana UI used by redirects and proxying. When unset, defaults to the embedded Grafana URL unless builtin observability is disabled.
         grafana_worker_dashboard_uid: Grafana dashboard UID for worker dashboard.
@@ -388,6 +390,8 @@ class Config(WorkerConfig, BaseSettings):
     disable_tracing: bool = False
     trace_otlp_endpoint: Optional[str] = None
     trace_advertise_endpoint: Optional[str] = None
+    trace_query_url: Optional[str] = None
+    log_grafana_datasource_uid: Optional[str] = None
     builtin_tempo_otlp_port: int = Field(default=4317, gt=0, le=65535)
     builtin_tempo_http_port: int = Field(default=3200, gt=0, le=65535)
     builtin_tempo_grpc_port: int = Field(default=9095, gt=0, le=65535)
@@ -553,6 +557,23 @@ class Config(WorkerConfig, BaseSettings):
                 pass
 
         raise ValueError(f"{info.field_name} must be an OTLP/gRPC host:port address")
+
+    @field_validator("trace_query_url")
+    @classmethod
+    def _validate_trace_query_url(cls, value: Optional[str]) -> Optional[str]:
+        value = (value or "").strip().rstrip("/")
+        if not value:
+            return None
+        parsed = urlparse(value)
+        if (
+            parsed.scheme not in ("http", "https")
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("trace_query_url must be an HTTP(S) base URL")
+        return value
 
     @field_validator("trusted_proxy_cidrs")
     @classmethod
@@ -1088,6 +1109,15 @@ class Config(WorkerConfig, BaseSettings):
             and not self.disable_tracing
             and not self.trace_otlp_endpoint
         )
+
+    def get_trace_query_url(self) -> Optional[str]:
+        if self.disable_tracing:
+            return None
+        if self.trace_query_url:
+            return self.trace_query_url
+        if self.use_builtin_tempo():
+            return f"http://127.0.0.1:{self.builtin_tempo_http_port}"
+        return None
 
     @property
     def effective_trace_otlp_endpoint(self) -> Optional[str]:

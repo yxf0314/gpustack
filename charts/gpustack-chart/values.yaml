@@ -89,6 +89,8 @@ image:
 logging:
   # Full OTLP/HTTP logs URL, including /v1/logs. Empty disables export.
   endpoint: ""
+  # Loki data source UID in the configured Grafana for request log links.
+  grafanaDatasourceUID: ""
   # RE2 patterns to replace with *** in exported log bodies, stack traces, and paths.
   redactPatterns: []
   higress:
@@ -107,6 +109,8 @@ tracing:
   # External OTLP/gRPC host:port. Takes precedence over built-in Tempo.
   # A worker-only release needs a supplied endpoint to export traces.
   endpoint: ""
+  # Tempo HTTP base URL for the request trace UI when using an external receiver.
+  queryURL: ""
   # Optional OTLP/gRPC address handed out by the server in Worker registration
   # commands. Set this when the ingest endpoint uses DNS local to the cluster.
   advertiseEndpoint: ""

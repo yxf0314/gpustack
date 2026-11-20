@@ -108,6 +108,19 @@ spec:
             - name: GPUSTACK_BUILTIN_TEMPO_RETENTION
               value: {{ $.Values.tracing.tempo.retention | quote }}
             {{- end }}
+            {{- if .Values.tracing.enabled }}
+            {{- if .Values.tracing.queryURL }}
+            - name: GPUSTACK_TRACE_QUERY_URL
+              value: {{ .Values.tracing.queryURL | quote }}
+            {{- else if (include "gpustack.tempoPodName" .) }}
+            - name: GPUSTACK_TRACE_QUERY_URL
+              value: {{ printf "http://%s.%s.svc.%s:3200" (include "gpustack.tempoName" .) .Release.Namespace .Values.clusterDomain | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.logging.grafanaDatasourceUID }}
+            - name: GPUSTACK_LOG_GRAFANA_DATASOURCE_UID
+              value: {{ . | quote }}
+            {{- end }}
             {{- if and .Values.tracing.enabled .Values.tracing.advertiseEndpoint }}
             - name: GPUSTACK_TRACE_ADVERTISE_ENDPOINT
               value: {{ .Values.tracing.advertiseEndpoint | quote }}

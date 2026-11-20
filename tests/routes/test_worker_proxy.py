@@ -29,6 +29,7 @@ from gpustack.api.exceptions import register_handlers
 from gpustack.gateway.utils import router_header_key
 from gpustack.logging import _ApplicationLogFormatter
 from gpustack.routes.worker import proxy as worker_proxy
+from gpustack.utils.model_instance_workers import ModelInstanceEndpoint
 from gpustack.utils.stall import stall_error_sse
 
 # Small enough to keep the suite fast, large enough not to be flaky on a loaded
@@ -210,6 +211,7 @@ async def test_worker_trace_reaches_engine_and_covers_proxy_stream(
     provider = TracerProvider(shutdown_on_exit=False)
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     app = _build_worker_app(9900, instance_id=7)
+    app.state.routed_target = ModelInstanceEndpoint(42, 7, 1, 9900)
     if trace_enabled:
         app.add_middleware(worker_proxy.WorkerProxyTracingMiddleware)
     tracer = provider.get_tracer(__name__)
@@ -265,6 +267,8 @@ async def test_worker_trace_reaches_engine_and_covers_proxy_stream(
     assert span.parent.span_id == int(incoming_span_id, 16)
     assert span.attributes["gpustack.request_id"] == req_id
     assert span.attributes["gpustack.model_instance_id"] == 7
+    assert span.attributes["gpustack.model_id"] == 42
+    assert span.attributes["http.route"] == "/v1/chat/completions"
     assert span.attributes["http.response.status_code"] == expected_status
     assert span.attributes.get("error.type") == error
     assert "secret" not in str(dict(span.attributes))

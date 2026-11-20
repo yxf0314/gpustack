@@ -199,6 +199,10 @@ def test_observability_endpoints_reach_server_and_workers(logs, trace_mode):
         f"logging.endpoint={log_endpoint if logs else ''}",
         "--set-string",
         f"tracing.endpoint={external_endpoint if trace_mode != 'builtin' else ''}",
+        "--set-string",
+        f"tracing.queryURL={'https://tempo.example' if trace_mode != 'builtin' else ''}",
+        "--set-string",
+        f"logging.grafanaDatasourceUID={'loki-source' if logs else ''}",
     )
     for kind, name in (
         ("StatefulSet", "gpustack-server"),
@@ -213,6 +217,17 @@ def test_observability_endpoints_reach_server_and_workers(logs, trace_mode):
             "true" if trace_mode == "disabled" else None
         )
     server = container_env(docs, "StatefulSet", "gpustack-server")
+    assert (
+        server.get("GPUSTACK_TRACE_QUERY_URL")
+        == {
+            "builtin": "http://gpustack-tempo.inference.svc.tenant.test:3200",
+            "external": "https://tempo.example",
+            "disabled": None,
+        }[trace_mode]
+    )
+    assert server.get("GPUSTACK_LOG_GRAFANA_DATASOURCE_UID") == (
+        "loki-source" if logs else None
+    )
     assert server.get("GPUSTACK_BUILTIN_TEMPO_POD") == (
         "gpustack-server-0" if trace_mode == "builtin" else None
     )

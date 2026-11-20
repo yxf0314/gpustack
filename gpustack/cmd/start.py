@@ -374,6 +374,16 @@ def start_cmd_options(parser_server: argparse.ArgumentParser):
         default=get_gpustack_env("LOG_OTLP_ENDPOINT"),
     )
     server_group.add_argument(
+        "--trace-query-url",
+        help="Tempo HTTP base URL for deployment request tracing.",
+        default=get_gpustack_env("TRACE_QUERY_URL"),
+    )
+    server_group.add_argument(
+        "--log-grafana-datasource-uid",
+        help="Loki data source UID for request log links in Grafana.",
+        default=get_gpustack_env("LOG_GRAFANA_DATASOURCE_UID"),
+    )
+    server_group.add_argument(
         "--disable-builtin-observability",
         action=OptionalBoolAction,
         help="Disable embedded Grafana and Prometheus services.",
@@ -1041,6 +1051,8 @@ def set_server_options(args, config_data: dict):
         "builtin_grafana_port",
         "prometheus_url",
         "grafana_url",
+        "trace_query_url",
+        "log_grafana_datasource_uid",
         "grafana_worker_dashboard_uid",
         "grafana_model_dashboard_uid",
     ]

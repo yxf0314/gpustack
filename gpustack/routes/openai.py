@@ -261,6 +261,8 @@ async def proxy_request_by_model(
             )
         request.state.model = model
         request.state.overridden_model_name = target.overridden_model_name
+        span = current_inference_span()
+        span.set_attribute("gpustack.model_id", model.id)
 
         # Resolve the route id so downstream middleware (usage recording) can
         # attribute the request to the route it entered through. The lookup
@@ -274,6 +276,7 @@ async def proxy_request_by_model(
             session, model, target.overridden_model_name
         )
         instance, rank_endpoint = await _select_managed_endpoint(session, instance)
+        span.set_attribute("gpustack.model_instance_id", instance.id)
         lookup_worker_id = (
             rank_endpoint.worker_id if rank_endpoint else instance.worker_id
         )

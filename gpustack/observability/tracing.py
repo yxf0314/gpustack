@@ -16,6 +16,24 @@ from starlette.requests import ClientDisconnect
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 _TRACE_CONTEXT = TraceContextTextMapPropagator()
+PUBLIC_INFERENCE_PATHS = frozenset(
+    f"/v1/{operation}"
+    for operation in (
+        "chat/completions",
+        "completions",
+        "embeddings",
+        "rerank",
+        "images/generations",
+        "images/edits",
+        "audio/speech",
+        "audio/transcriptions",
+        "audio/translations",
+        "responses",
+        "messages",
+        "videos",
+        "videos/sync",
+    )
+)
 _INFERENCE_TRACER: ContextVar[Optional[trace.Tracer]] = ContextVar(
     "inference_tracer", default=None
 )
@@ -133,6 +151,14 @@ async def trace_inference_http(
         nonlocal complete, disconnected
         if message["type"] == "http.response.start":
             set_http_status(span, message["status"])
+            media_type = Headers(raw=list(message.get("headers", []))).get(
+                "content-type"
+            )
+            if media_type:
+                span.set_attribute(
+                    "gpustack.stream",
+                    media_type.partition(";")[0].strip().lower() == "text/event-stream",
+                )
         if message["type"] == "http.response.body" and not message.get("more_body"):
             complete = True
         try:

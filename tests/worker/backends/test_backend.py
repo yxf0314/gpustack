@@ -199,6 +199,8 @@ def test_engine_observability_switches(tmp_path, engine, logs, traces):
             arguments[arguments.index("--otlp-traces-endpoint") + 1] == _TRACE_COLLECTOR
         )
         assert any("--otlp-traces-endpoint" in item for item in injected)
+    if engine == "vllm":
+        assert launch["env"].get("OTEL_SERVICE_NAME") == ("vllm" if traces else None)
     if engine == "sglang":
         assert ("--enable-trace" in arguments) is traces
         assert launch["env"].get("SGLANG_LOG_REQUEST_HEADERS") == (
@@ -274,6 +276,26 @@ def test_engine_observability_respects_explicit_settings(
     assert any("--otlp-traces-endpoint" in item for item in injected) is traces
     assert (_TRACE_COLLECTOR in launch["command_args"]) is traces
     assert all(launch["env"].get(key) == value for key, value in model_env.items())
+
+
+@pytest.mark.parametrize(
+    ("model_env", "expected"),
+    [
+        ({"OTEL_SERVICE_NAME": "custom-engine"}, "custom-engine"),
+        (
+            {"OTEL_RESOURCE_ATTRIBUTES": "team=inference, service.name=custom-engine"},
+            None,
+        ),
+        ({"OTEL_RESOURCE_ATTRIBUTES": "team=inference"}, "vllm"),
+    ],
+)
+def test_vllm_managed_tracing_preserves_configured_service_name(
+    tmp_path, model_env, expected
+):
+    launch, _ = _capture_observable_engine_launch(
+        tmp_path, "vllm", logs=False, traces=True, model_env=model_env
+    )
+    assert launch["env"].get("OTEL_SERVICE_NAME") == expected
 
 
 @pytest.mark.parametrize(

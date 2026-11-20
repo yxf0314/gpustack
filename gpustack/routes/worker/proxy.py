@@ -26,6 +26,7 @@ from gpustack.api.exceptions import (
 )
 from gpustack import envs
 from gpustack.observability.tracing import (
+    PUBLIC_INFERENCE_PATHS,
     current_inference_span,
     inference_request_id,
     inject_trace_context,
@@ -279,6 +280,11 @@ async def proxy(path: str, request: Request):  # noqa: C901
         }
         if span.is_recording() and target_instance_id:
             span.set_attribute("gpustack.model_instance_id", int(target_instance_id))
+            endpoint = getattr(request.state, "model_instance_endpoint", None)
+            if endpoint is not None:
+                span.set_attribute("gpustack.model_id", endpoint.model_id)
+            if f"/{path}" in PUBLIC_INFERENCE_PATHS:
+                span.set_attribute("http.route", f"/{path}")
         # Read the header while popping it: aiohttp sets its own framing, and
         # checking after the pop would never see a chunked upload.
         transfer_encoding = headers.pop("transfer-encoding", "")

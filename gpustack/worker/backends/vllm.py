@@ -1656,6 +1656,11 @@ class VLLMServer(InferenceServer):
             and env.get("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc") == "grpc"
         ):
             arguments.extend(["--otlp-traces-endpoint", trace_endpoint])
+            if not any(
+                attribute.partition("=")[0].strip() == "service.name"
+                for attribute in env.get("OTEL_RESOURCE_ATTRIBUTES", "").split(",")
+            ):
+                env.setdefault("OTEL_SERVICE_NAME", "vllm")
         return arguments
 
     def _make_args_context(
