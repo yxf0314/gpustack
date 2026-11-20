@@ -105,13 +105,16 @@ If you already have an external Prometheus/Grafana stack, you can configure it m
 
 ## Inference Logs and Traces
 
-Use the `X-GPUStack-Request-Id` response header to look up inference logs and traces. The bundled gateway adds this header when logging or tracing is configured. Docker servers and Helm server releases export traces to built-in Tempo by default. Built-in Tempo uses a 24-hour retention period by default. Log export is independent and requires a log endpoint.
+Use the `X-GPUStack-Request-Id` response header to look up inference logs and traces. The bundled gateway adds this header when logging or tracing is configured. Docker servers and Helm server releases export traces to built-in Tempo by default. Built-in Tempo keeps up to seven days of traces and up to 3 GB of searchable blocks. Log export is independent and requires a log endpoint.
 
 | Trace destination | Docker | Helm |
 | --- | --- | --- |
 | Built-in Tempo | Default on the Server | Default in a Server release |
 | External OTLP/gRPC receiver | Set `GPUSTACK_TRACE_OTLP_ENDPOINT` | Set `tracing.endpoint` |
+| Built-in Tempo retention age | Set `GPUSTACK_BUILTIN_TEMPO_RETENTION` | Set `tracing.tempo.retention` |
 | Disabled | Set `GPUSTACK_DISABLE_TRACING=true` | Set `tracing.enabled=false` |
+
+The `Request Tracing` tab in deployment details initially searches the last 24 hours. Page through the results or enter a full Request ID or Trace ID to find a specific request. When log export is configured, open `View related logs` from the request detail. Configure the Grafana Loki data source with `GPUSTACK_LOG_GRAFANA_DATASOURCE_UID` on Docker or `logging.grafanaDatasourceUID` on Helm. For external Tempo, set the query endpoint using `GPUSTACK_TRACE_QUERY_URL` or `tracing.queryURL`.
 
 When log export is enabled, the Server and Workers write one JSON stream to the container console. Alloy reads that stream alongside supported engine log formats. To check for discarded records, use Alloy's `otelcol_processor_filter_logs_filtered_total` metric with the `engine_format` or `higress_format` component. The engine filter rejects standalone plain-text lines without a recognized log prefix.
 
@@ -130,7 +133,7 @@ Pass them with `docker run -e` or under `environment` in your Compose file. The 
 
 You can also pass `--log-otlp-endpoint` and `--trace-otlp-endpoint` after the Docker image name. See the [`gpustack start` reference](../cli-reference/start.md#common-options).
 
-The built-in Tempo runs in the Server container and stores data in the `tempo` subdirectory of the GPUStack data directory. Trace persistence follows the Server data mount. You can also mount the `tempo` subdirectory on a separate volume to control its disk usage. Retention limits the age of stored traces. Disk usage also depends on request volume and the number of spans per request.
+The built-in Tempo runs in the Server container and stores data in the `tempo` subdirectory of the GPUStack data directory. Trace persistence follows the Server data mount. You can also mount the `tempo` subdirectory on a separate volume to control its disk usage. Tempo periodically expires old blocks. When searchable blocks exceed 3 GB (3,000,000,000 bytes), Tempo also expires the oldest blocks until they fit. Allow additional space for the write-ahead log, compaction, and files awaiting physical deletion.
 
 Tempo's ingest, query, and internal gRPC ports default to 4317, 3200, and 9095. If another process occupies one of these ports, the Server continues starting while s6 retries Tempo on the same ports after a five-second delay. Trace producers continue sending to their configured address during the wait. If an existing OTLP receiver is listening there, it can receive those spans. To configure different ports, set `GPUSTACK_BUILTIN_TEMPO_OTLP_PORT`, `GPUSTACK_BUILTIN_TEMPO_HTTP_PORT`, or `GPUSTACK_BUILTIN_TEMPO_GRPC_PORT`. The query and internal gRPC ports bind to loopback. In Docker bridge mode, a conflict on a published host port must be resolved before Docker can start the container.
 

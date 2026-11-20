@@ -283,6 +283,10 @@ async def proxy(path: str, request: Request):  # noqa: C901
             endpoint = getattr(request.state, "model_instance_endpoint", None)
             if endpoint is not None:
                 span.set_attribute("gpustack.model_id", endpoint.model_id)
+                if endpoint.instance_name:
+                    span.set_attribute(
+                        "gpustack.model_instance_name", endpoint.instance_name
+                    )
             if f"/{path}" in PUBLIC_INFERENCE_PATHS:
                 span.set_attribute("http.route", f"/{path}")
         # Read the header while popping it: aiohttp sets its own framing, and

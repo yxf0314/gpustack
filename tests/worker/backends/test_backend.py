@@ -199,6 +199,9 @@ def test_engine_observability_switches(tmp_path, engine, logs, traces):
             arguments[arguments.index("--otlp-traces-endpoint") + 1] == _TRACE_COLLECTOR
         )
         assert any("--otlp-traces-endpoint" in item for item in injected)
+        assert launch["env"]["OTEL_RESOURCE_ATTRIBUTES"] == (
+            "gpustack.engine_instance_id=1,gpustack.engine_instance_name=llm-1"
+        )
     if engine == "vllm":
         assert launch["env"].get("OTEL_SERVICE_NAME") == ("vllm" if traces else None)
     if engine == "sglang":

@@ -520,7 +520,7 @@ def prepare_builtin_tempo(cfg: Config) -> bool:
 
     path = Path(os.environ["GPUSTACK_RUN_DIR"]) / "tempo" / "config.yaml"
     data = Path(cfg.data_dir) / "tempo"
-    retention = os.getenv("GPUSTACK_BUILTIN_TEMPO_RETENTION") or "24h"
+    retention = os.getenv("GPUSTACK_BUILTIN_TEMPO_RETENTION") or "168h"
     loopback = "127.0.0.1"
     try:
         _write_yaml_atomically(
@@ -552,11 +552,17 @@ def prepare_builtin_tempo(cfg: Config) -> bool:
                 "storage": {
                     "trace": {
                         "backend": "local",
+                        "blocklist_poll": "1m",
                         "wal": {"path": str(data / "wal")},
                         "local": {"path": str(data / "blocks")},
                     },
                 },
-                "compactor": {"compaction": {"block_retention": retention}},
+                "compactor": {
+                    "compaction": {
+                        "block_retention": retention,
+                        "max_retained_bytes": 3_000_000_000,
+                    }
+                },
                 "usage_report": {"reporting_enabled": False},
             },
         )

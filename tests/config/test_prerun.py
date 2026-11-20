@@ -72,10 +72,14 @@ def test_builtin_tempo_config_and_service(tmp_path, monkeypatch):
     assert receiver == {"grpc": {"endpoint": "0.0.0.0:13417"}}
     assert config["storage"]["trace"] == {
         "backend": "local",
+        "blocklist_poll": "1m",
         "wal": {"path": str(tmp_path / "data" / "tempo" / "wal")},
         "local": {"path": str(tmp_path / "data" / "tempo" / "blocks")},
     }
-    assert config["compactor"]["compaction"]["block_retention"] == "24h"
+    assert config["compactor"]["compaction"] == {
+        "block_retention": "168h",
+        "max_retained_bytes": 3_000_000_000,
+    }
     assert config["ingester"]["flush_all_on_shutdown"] is True
     assert {
         port
@@ -181,6 +185,7 @@ def test_helm_tempo_uses_the_selected_servers_data_dir(
         assert config["server"]["http_listen_address"] == "0.0.0.0"
         assert config["storage"]["trace"] == {
             "backend": "local",
+            "blocklist_poll": "1m",
             "wal": {"path": str(data_dir / "tempo" / "wal")},
             "local": {"path": str(data_dir / "tempo" / "blocks")},
         }

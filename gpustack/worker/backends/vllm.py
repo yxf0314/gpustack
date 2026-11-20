@@ -19,6 +19,7 @@ from gpustack_runtime.deployer import (
 )
 from gpustack_runtime.deployer.__utils__ import compare_versions
 from gpustack_runtime.detector import ManufacturerEnum, manufacturer_to_backend
+from gpustack.observability.tracing import set_engine_trace_instance
 from gpustack.schemas.models import (
     BackendEnum,
     ModelInstance,
@@ -1661,6 +1662,9 @@ class VLLMServer(InferenceServer):
                 for attribute in env.get("OTEL_RESOURCE_ATTRIBUTES", "").split(",")
             ):
                 env.setdefault("OTEL_SERVICE_NAME", "vllm")
+            set_engine_trace_instance(
+                env, self._model_instance.id, self._model_instance.name
+            )
         return arguments
 
     def _make_args_context(

@@ -1,3 +1,4 @@
+import base64
 import time
 from typing import Annotated, List, Optional
 from urllib.parse import urlparse
@@ -19,8 +20,11 @@ from gpustack.observability.request_traces import (
     RequestOutcome,
     RequestTraceCapabilities,
     RequestTraceDetail,
+    RequestTracePage,
     RequestTraceRecord,
+    TracePagePosition,
     get_request_trace,
+    search_request_trace_page,
     search_request_traces,
 )
 from gpustack.schemas.models import Model
@@ -81,18 +85,23 @@ async def get_capabilities(
 async def list_traces(
     request: Request,
     model_id: TraceModelDep,
-    window: str = "1h",
+    window: str = "24h",
     q: Annotated[Optional[str], Query(pattern=f"^(?:{TRACE_ID}|{REQUEST_ID})$")] = None,
     outcome: Optional[RequestOutcome] = None,
     instance_id: Annotated[Optional[int], Query(gt=0)] = None,
     no_engine: bool = False,
     start: Annotated[Optional[int], Query(ge=0)] = None,
     end: Annotated[Optional[int], Query(ge=0)] = None,
-) -> List[RequestTraceRecord]:
+    page_size: Annotated[Optional[int], Query(ge=1, le=50)] = None,
+    cursor: Annotated[Optional[str], Query(max_length=12_000)] = None,
+) -> List[RequestTraceRecord] | RequestTracePage:
     if q and len(q) == 32:
         q = q.lower()
     now = int(time.time())
-    if start is None and end is None:
+    if cursor is not None:
+        position = _decode_cursor(cursor, now)
+        start, end = position.start, position.end
+    elif start is None and end is None:
         end = now + 1
         try:
             start = end - parse_window(window)
@@ -106,6 +115,22 @@ async def list_traces(
                 message="Provide start and end in the past with a span of up to 7 days"
             ) from None
         start, end = int(interval.start), int(interval.end)
+    if page_size is not None or cursor is not None:
+        return await search_request_trace_page(
+            request.app.state.http_client_no_proxy,
+            _query_url(),
+            model_id,
+            position=(
+                position
+                if cursor is not None
+                else TracePagePosition(start=start, end=end, before=end)
+            ),
+            page_size=page_size or 10,
+            identifier=q,
+            outcome=outcome,
+            instance_id=instance_id,
+            no_engine=no_engine,
+        )
     return await search_request_traces(
         request.app.state.http_client_no_proxy,
         _query_url(),
@@ -117,6 +142,21 @@ async def list_traces(
         instance_id=instance_id,
         no_engine=no_engine,
     )
+
+
+def _decode_cursor(cursor: str, now: int) -> TracePagePosition:
+    try:
+        position = TracePagePosition.model_validate_json(
+            base64.urlsafe_b64decode(cursor)
+        )
+    except ValueError:
+        raise BadRequestException(message="Invalid trace page cursor") from None
+    if (
+        not position.start < position.before <= position.end <= now + 1
+        or position.end - position.start > 7 * 24 * 3600
+    ):
+        raise BadRequestException(message="Invalid trace page cursor")
+    return position
 
 
 @router.get("/{trace_id}")

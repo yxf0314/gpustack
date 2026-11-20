@@ -7,10 +7,10 @@ import math
 import re
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
 
 import aiohttp
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StringConstraints
 
 from gpustack.api.exceptions import ServiceUnavailableException
 from gpustack.observability.tracing import PUBLIC_INFERENCE_PATHS
@@ -42,12 +42,15 @@ _PROJECTION = ",".join(
         "span:parentID",
         "span:status",
         "resource.service.name",
+        "resource.gpustack.engine_instance_id",
+        "resource.gpustack.engine_instance_name",
         *[
             f"span.{name}"
             for name in (
                 "gpustack.request_id",
                 "gpustack.model_id",
                 "gpustack.model_instance_id",
+                "gpustack.model_instance_name",
                 "gpustack.cancelled",
                 "gpustack.stream",
                 "http.route",
@@ -61,6 +64,9 @@ _PROJECTION = ",".join(
 )
 _MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 _MAX_DETAIL_SPANS = 256
+_SEARCH_BATCH_SIZE = 100
+_CURSOR_ID_LIMIT = 240
+_NANOSECONDS_PER_SECOND = 1_000_000_000
 
 
 class RequestTraceCapabilities(BaseModel):
@@ -92,8 +98,30 @@ class RequestTraceRecord(BaseModel):
     outcome: RequestOutcome
     stream: Optional[bool]
     instance_id: Optional[int]
+    instance_name: Optional[str] = None
     has_engine: bool
     engine: Optional[RequestEngineMetrics]
+
+
+class RequestTracePage(BaseModel):
+    items: List[RequestTraceRecord]
+    cursor: str = ""
+    next_cursor: Optional[str] = None
+
+
+_TraceId = Annotated[str, StringConstraints(pattern=f"^{TRACE_ID}$")]
+
+
+class TracePagePosition(BaseModel):
+    start: int = Field(ge=0)
+    end: int
+    before: int
+    seen: List[_TraceId] = Field(default_factory=list, max_length=_CURSOR_ID_LIMIT)
+    partial: Optional[_TraceId] = None
+    offset: int = Field(default=0, ge=0)
+
+    def encode(self) -> str:
+        return base64.urlsafe_b64encode(self.model_dump_json().encode()).decode()
 
 
 class RequestTraceSpan(BaseModel):
@@ -195,6 +223,9 @@ def _search_spans(trace: dict) -> List[_Span]:
     for group in trace.get("spanSets") or [trace.get("spanSet", {})]:
         for item in group.get("spans", []):
             attrs = _attributes(item.get("attributes", []))
+            for key in ("gpustack.engine_instance_id", "gpustack.engine_instance_name"):
+                if f"resource.{key}" in attrs:
+                    attrs[key] = attrs[f"resource.{key}"]
             span = _Span(
                 id=_span_id(item["spanID"]) or "",
                 parent_id=_span_id(attrs.get("span:parentID")),
@@ -236,7 +267,17 @@ def _detail_spans(data: dict) -> List[_Span]:
                         status=str(item.get("status", {}).get("code", "unset"))
                         .lower()
                         .removeprefix("status_code_"),
-                        attrs=_attributes(item.get("attributes", [])),
+                        attrs={
+                            **_attributes(item.get("attributes", [])),
+                            **{
+                                key: resource[key]
+                                for key in (
+                                    "gpustack.engine_instance_id",
+                                    "gpustack.engine_instance_name",
+                                )
+                                if key in resource
+                            },
+                        },
                         reported_service=(
                             reported_service if service != reported_service else None
                         ),
@@ -367,6 +408,27 @@ def _engine_metrics(spans: List[_Span]) -> Optional[RequestEngineMetrics]:
     return observations[0] if len(observations) == 1 else None
 
 
+def _instance_name(
+    instance_id: int, anchors: List[_Span], spans: List[_Span]
+) -> Optional[str]:
+    names = {
+        name[:255]
+        for span in anchors
+        if span.service in _PLATFORM and span.target[1] == instance_id
+        if isinstance(name := span.attrs.get("gpustack.model_instance_name"), str)
+        and name
+    }
+    if not names:
+        names = {
+            name[:255]
+            for span in spans
+            if span.attrs.get("gpustack.engine_instance_id") == str(instance_id)
+            if isinstance(name := span.attrs.get("gpustack.engine_instance_name"), str)
+            and name
+        }
+    return next(iter(names)) if len(names) == 1 else None
+
+
 def _summarize(
     trace_id: str, entry: _Span, anchors: List[_Span], spans: List[_Span]
 ) -> RequestTraceRecord:
@@ -384,6 +446,7 @@ def _summarize(
     # A gateway retry can select a different instance. Only show a single ID
     # when the observations agree.
     instances = {span.target[1] for span in anchors} - {None}
+    instance_id = next(iter(instances)) if len(instances) == 1 else None
     stream = next(
         (
             value
@@ -402,13 +465,18 @@ def _summarize(
         status_code=status,
         outcome=_request_outcome(status, entry, spans),
         stream=stream,
-        instance_id=next(iter(instances)) if len(instances) == 1 else None,
+        instance_id=instance_id,
+        instance_name=(
+            _instance_name(instance_id, anchors, spans) if instance_id else None
+        ),
         has_engine=any(span.is_engine for span in spans),
         engine=_engine_metrics(spans),
     )
 
 
-def _search_query(model_id: int, identifier: Optional[str]) -> str:
+def _search_query(
+    model_id: int, identifier: Optional[str], seen: Tuple[str, ...] = ()
+) -> str:
     if identifier and re.fullmatch(TRACE_ID, identifier):
         return f'{{trace:id="{identifier.lower()}"}} | select({_PROJECTION})'
     direct = f"router outbound.*[|][|]model-{model_id}-.* egress"
@@ -418,6 +486,9 @@ def _search_query(model_id: int, identifier: Optional[str]) -> str:
     query = f"({scope}||({scope}<<{platform})||({scope}>>{engine}))"
     if identifier:
         query += '&&{span.gpustack.request_id=' + json.dumps(identifier) + "}"
+    if seen:
+        excluded = "&&".join(f'trace:id!="{trace_id}"' for trace_id in seen)
+        query += "&&{" + excluded + "}"
     return f"{query} | select({_PROJECTION}) with (most_recent=true)"
 
 
@@ -455,6 +526,65 @@ async def _tempo_get(
         ) from None
 
 
+async def _search_candidates(
+    client: aiohttp.ClientSession,
+    base_url: str,
+    model_id: int,
+    start: int,
+    end: int,
+    identifier: Optional[str],
+    seen: Tuple[str, ...] = (),
+) -> List[dict]:
+    payload = await _tempo_get(
+        client,
+        f"{base_url}/api/search",
+        {
+            "q": _search_query(model_id, identifier, seen),
+            "start": start,
+            "end": end,
+            "limit": _SEARCH_BATCH_SIZE,
+            "spss": 24,
+        },
+    )
+    return payload.get("traces", [])
+
+
+@dataclass
+class _RowFilter:
+    model_id: int
+    start: int
+    end: int
+    identifier: Optional[str]
+    outcome: Optional[RequestOutcome]
+    instance_id: Optional[int]
+    no_engine: bool
+
+    def rows(self, trace: dict) -> List[RequestTraceRecord]:
+        trace_id = _tempo_trace_id(trace["traceID"])
+        if not trace_id:
+            return []
+        rows = (
+            _summarize(trace_id, entry, anchors, spans)
+            for entry, anchors, spans in _requests(_search_spans(trace), self.model_id)
+        )
+        return sorted(
+            (
+                row
+                for row in rows
+                if self.start * 1000 <= row.started_at_ms < self.end * 1000
+                and (
+                    not self.identifier
+                    or self.identifier in (row.request_id, row.trace_id)
+                )
+                and (self.outcome is None or row.outcome == self.outcome)
+                and (self.instance_id is None or row.instance_id == self.instance_id)
+                and (not self.no_engine or not row.has_engine)
+            ),
+            key=lambda row: (row.started_at_ms, row.request_id or ""),
+            reverse=True,
+        )
+
+
 async def search_request_traces(
     client: aiohttp.ClientSession,
     base_url: str,
@@ -467,39 +597,117 @@ async def search_request_traces(
     instance_id: Optional[int],
     no_engine: bool,
 ) -> List[RequestTraceRecord]:
-    payload = await _tempo_get(
-        client,
-        f"{base_url}/api/search",
-        {
-            "q": _search_query(model_id, identifier),
-            "start": start,
-            "end": end,
-            "limit": 100,
-            "spss": 24,
-        },
+    candidates = await _search_candidates(
+        client, base_url, model_id, start, end, identifier
+    )
+    filters = _RowFilter(
+        model_id, start, end, identifier, outcome, instance_id, no_engine
     )
     try:
-        rows = [
-            _summarize(trace["traceID"], entry, anchors, spans)
-            for trace in payload.get("traces", [])
-            if re.fullmatch(TRACE_ID, trace["traceID"])
-            for entry, anchors, spans in _requests(_search_spans(trace), model_id)
-        ]
+        return sorted(
+            (row for trace in candidates for row in filters.rows(trace)),
+            key=lambda row: row.started_at_ms,
+            reverse=True,
+        )
     except (AttributeError, KeyError, TypeError, ValueError):
         raise ServiceUnavailableException("Trace query returned invalid data") from None
-    return sorted(
-        (
-            row
-            for row in rows
-            if start * 1000 <= row.started_at_ms < end * 1000
-            and (not identifier or identifier in (row.request_id, row.trace_id))
-            and (outcome is None or row.outcome == outcome)
-            and (instance_id is None or row.instance_id == instance_id)
-            and (not no_engine or not row.has_engine)
+
+
+def _tempo_trace_id(value: str) -> str:
+    # Tempo renders IDs without leading zeroes in search metadata.
+    return value.lower().zfill(32) if re.fullmatch(r"[0-9a-fA-F]{1,32}", value) else ""
+
+
+def _candidate_key(trace: dict) -> Tuple[int, str]:
+    return int(trace["startTimeUnixNano"]), _tempo_trace_id(trace["traceID"])
+
+
+def _page_from_candidates(
+    candidates: List[dict],
+    position: TracePagePosition,
+    filters: _RowFilter,
+    page_size: int,
+) -> RequestTracePage:
+    cursor = position.encode()
+    items: List[RequestTraceRecord] = []
+    # Tempo search takes second-resolution bounds. Exclude consumed candidates
+    # in the overlapping second so advancing the window cannot skip ties.
+    partial, offset = position.partial, position.offset
+    for trace in sorted(candidates, key=_candidate_key, reverse=True):
+        started, trace_id = _candidate_key(trace)
+        if not trace_id or trace_id in position.seen:
+            continue
+        rows = filters.rows(trace)
+        if trace_id == partial:
+            rows = rows[offset:]
+        before = max(
+            position.start + 1,
+            min(position.before, started // _NANOSECONDS_PER_SECOND + 1),
+        )
+        if before != position.before:
+            position.before = before
+            position.seen.clear()
+        remaining = page_size - len(items)
+        items.extend(rows[:remaining])
+        if len(rows) > remaining:
+            position.partial = trace_id
+            position.offset = (offset if trace_id == partial else 0) + remaining
+            return RequestTracePage(
+                items=items, cursor=cursor, next_cursor=position.encode()
+            )
+        if len(position.seen) < _CURSOR_ID_LIMIT:
+            position.seen.append(trace_id)
+        else:
+            raise ServiceUnavailableException(
+                "Too many traces in a single second to page"
+            )
+    position.partial = None
+    position.offset = 0
+    return RequestTracePage(
+        items=items,
+        cursor=cursor,
+        next_cursor=(
+            position.encode() if len(candidates) >= _SEARCH_BATCH_SIZE else None
         ),
-        key=lambda row: row.started_at_ms,
-        reverse=True,
     )
+
+
+async def search_request_trace_page(
+    client: aiohttp.ClientSession,
+    base_url: str,
+    model_id: int,
+    *,
+    position: TracePagePosition,
+    page_size: int,
+    identifier: Optional[str],
+    outcome: Optional[RequestOutcome],
+    instance_id: Optional[int],
+    no_engine: bool,
+) -> RequestTracePage:
+    filters = _RowFilter(
+        model_id,
+        position.start,
+        position.end,
+        identifier,
+        outcome,
+        instance_id,
+        no_engine,
+    )
+    candidates = await _search_candidates(
+        client,
+        base_url,
+        model_id,
+        position.start,
+        position.before,
+        identifier,
+        tuple(position.seen),
+    )
+    try:
+        page = _page_from_candidates(candidates, position, filters, page_size)
+        page.items.sort(key=lambda row: row.started_at_ms, reverse=True)
+        return page
+    except (AttributeError, KeyError, TypeError, ValueError):
+        raise ServiceUnavailableException("Trace query returned invalid data") from None
 
 
 def _display_span(span: _Span, start: int) -> RequestTraceSpan:

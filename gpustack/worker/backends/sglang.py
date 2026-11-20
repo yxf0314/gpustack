@@ -19,6 +19,7 @@ from gpustack_runtime.deployer import (
 )
 from gpustack_runtime.deployer.__utils__ import compare_versions
 
+from gpustack.observability.tracing import set_engine_trace_instance
 from gpustack.scheduler.model_registry import is_multimodal_model
 from gpustack.schemas.inference_backend import is_built_in_backend_custom_version
 from gpustack.schemas.models import (
@@ -773,6 +774,9 @@ class SGLangServer(InferenceServer):
         ):
             # Keep the major stages while omitting per-step decode spans.
             env.setdefault("SGLANG_TRACE_LEVEL", "1")
+            set_engine_trace_instance(
+                env, self._model_instance.id, self._model_instance.name
+            )
             arguments.extend(
                 ["--enable-trace", "--otlp-traces-endpoint", trace_endpoint]
             )

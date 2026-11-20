@@ -115,7 +115,7 @@ tracing:
   # commands. Set this when the ingest endpoint uses DNS local to the cluster.
   advertiseEndpoint: ""
   tempo:
-    retention: 24h
+    retention: 168h
 server:
   # Deploy the GPUStack server (control plane) from this release.
   #

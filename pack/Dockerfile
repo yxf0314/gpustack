@@ -32,6 +32,7 @@ ARG PROMETHEUS_VERSION=3.5.1
 ARG GRAFANA_VERSION=12.2.4
 ARG ALLOY_VERSION=v1.22.0
 ARG TEMPO_VERSION=2.10.10
+ARG TEMPO_SOURCE_SHA256=9a4ecf9f2d9c245704965b2844a35d6769e0ed97fdfc3d44663f90d307c5d466
 
 # Stage Base
 #
@@ -45,7 +46,20 @@ FROM gpustack/mirrored-higress-higress:${HIGRESS_VERSION} AS controller
 FROM gpustack/mirrored-higress-pilot:${HIGRESS_VERSION} AS pilot
 FROM gpustack/mirrored-higress-gateway:${HIGRESS_VERSION} AS gateway
 FROM grafana/alloy:${ALLOY_VERSION} AS alloy
-FROM grafana/tempo:${TEMPO_VERSION} AS tempo
+FROM --platform=$BUILDPLATFORM golang:1.26.10-bookworm AS tempo
+ARG TEMPO_VERSION
+ARG TEMPO_SOURCE_SHA256
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /src
+COPY pack/tempo/retained-bytes.patch /tmp/retained-bytes.patch
+RUN curl --retry 3 -fsSL "https://codeload.github.com/grafana/tempo/tar.gz/refs/tags/v${TEMPO_VERSION}" -o /tmp/tempo.tar.gz \
+    && printf '%s  /tmp/tempo.tar.gz\n' "${TEMPO_SOURCE_SHA256}" | sha256sum --check \
+    && tar -xzf /tmp/tempo.tar.gz --strip-components=1 \
+    && patch -p1 < /tmp/retained-bytes.patch \
+    && CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" go build -mod=vendor -trimpath \
+        -ldflags="-s -w -X main.Version=${TEMPO_VERSION}" -o /tempo ./cmd/tempo
+
 FROM ubuntu:24.04@sha256:d1e2e92c075e5ca139d51a140fff46f84315c0fdce203eab2807c7e495eff4f9 AS base
 SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
 

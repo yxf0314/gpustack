@@ -134,3 +134,33 @@ def test_invalid_trace_range_never_queries_tempo(trace_client, monkeypatch, offs
     response = client.get("/models/42/request-traces", params=params)
     assert response.status_code == 400
     search.assert_not_awaited()
+
+
+def test_cursor_pins_24_hour_window(trace_client, monkeypatch):
+    client, _, cfg = trace_client
+    cfg.effective_trace_otlp_endpoint = "tempo:4317"
+    cfg.get_trace_query_url.return_value = "http://tempo:3200"
+    client.app.state.http_client_no_proxy = object()
+    query = AsyncMock(return_value=request_traces.RequestTracePage(items=[]))
+    monkeypatch.setattr(request_traces, "search_request_trace_page", query)
+    expected_now = int(time.time()) - 60
+    url = "/models/42/request-traces"
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            request_traces, "time", SimpleNamespace(time=lambda: expected_now)
+        )
+        assert client.get(url, params={"page_size": 10}).status_code == 200
+        first = query.await_args.kwargs["position"]
+        assert first.end - first.start == 86400
+        patch.setattr(
+            request_traces, "time", SimpleNamespace(time=lambda: expected_now + 5)
+        )
+        assert (
+            client.get(
+                url, params={"page_size": 10, "cursor": first.encode()}
+            ).status_code
+            == 200
+        )
+        assert query.await_args.kwargs["position"] == first
+    assert client.get(url, params={"cursor": "invalid"}).status_code == 400
+    assert query.await_count == 2

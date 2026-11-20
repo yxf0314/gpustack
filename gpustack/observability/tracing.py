@@ -1,7 +1,8 @@
 import asyncio
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
-from typing import AsyncIterator, Iterator, Optional
+from typing import AsyncIterator, Dict, Iterator, Optional
+from urllib.parse import quote
 from uuid import UUID
 
 from opentelemetry import trace
@@ -37,6 +38,13 @@ PUBLIC_INFERENCE_PATHS = frozenset(
 _INFERENCE_TRACER: ContextVar[Optional[trace.Tracer]] = ContextVar(
     "inference_tracer", default=None
 )
+
+
+def set_engine_trace_instance(env: Dict[str, str], instance_id: int, name: str) -> None:
+    """Record the engine identity for gateway routes that bypass the Worker API."""
+    attrs = env.get("OTEL_RESOURCE_ATTRIBUTES", "")
+    identity = f"gpustack.engine_instance_id={instance_id},gpustack.engine_instance_name={quote(name, safe='')}"
+    env["OTEL_RESOURCE_ATTRIBUTES"] = ",".join(filter(None, (attrs, identity)))
 
 
 @asynccontextmanager

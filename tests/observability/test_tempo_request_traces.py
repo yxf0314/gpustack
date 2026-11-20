@@ -7,7 +7,9 @@ import pytest
 
 from gpustack.api.exceptions import ServiceUnavailableException
 from gpustack.observability.request_traces import (
+    TracePagePosition,
     get_request_trace,
+    search_request_trace_page,
     search_request_traces,
 )
 
@@ -86,6 +88,7 @@ async def test_detail_follows_only_the_selected_request_branch():
             **{
                 "gpustack.model_id": 42,
                 "gpustack.model_instance_id": 8,
+                "gpustack.model_instance_name": "removed-instance",
                 "gpustack.request_id": _REQUEST,
                 "http.route": "/v1/chat/completions",
                 "gpustack.stream": True,
@@ -122,6 +125,7 @@ async def test_detail_follows_only_the_selected_request_branch():
     detail = await get_request_trace(client, "http://tempo", 42, _TRACE, _REQUEST)
     assert detail.span_count == 4
     assert {int(span.id, 16) for span in detail.spans} == {2, 3, 4, 5}
+    assert detail.request.instance_name == "removed-instance"
     assert detail.request.outcome == "cancelled"
     assert detail.request.status_code == 200
     assert detail.request.observed_by == "gpustack.higress"
@@ -176,6 +180,7 @@ async def test_search_projects_request_data_with_one_bounded_query():
                 "span:parentID": upstream["spanID"],
                 "gpustack.model_id": 42,
                 "gpustack.model_instance_id": 8,
+                "gpustack.model_instance_name": "removed-instance",
                 "gpustack.request_id": _REQUEST,
                 "http.response.status_code": 504,
             }
@@ -202,6 +207,7 @@ async def test_search_projects_request_data_with_one_bounded_query():
     (row,) = rows
     assert not row.has_engine
     assert row.instance_id == 8
+    assert row.instance_name == "removed-instance"
     assert row.status_code == 504
     assert row.started_at_ms == 100_000
     client.get.assert_called_once()
@@ -286,3 +292,112 @@ async def test_stream_error_preserves_the_committed_http_status():
     )
     assert detail.request.outcome == "error"
     assert detail.request.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_direct_trace_keeps_the_name_of_its_selected_engine():
+    gateway = _span(
+        "gpustack.higress",
+        1,
+        None,
+        "router outbound|80||model-42-8.static egress",
+        100,
+        4,
+        **{"gpustack.request_id": _REQUEST},
+    )
+    engine = _span("vllm", 2, 1, "llm_request", 101, 3)
+    engine["resource"]["attributes"].extend(
+        _attributes(
+            **{
+                "gpustack.engine_instance_id": "8",
+                "gpustack.engine_instance_name": "removed-8",
+            }
+        )
+    )
+    other = _span("vllm", 3, 1, "llm_request", 101, 3)
+    other["resource"]["attributes"].extend(
+        _attributes(
+            **{
+                "gpustack.engine_instance_id": "90",
+                "gpustack.engine_instance_name": "unrelated",
+            }
+        )
+    )
+
+    detail = await get_request_trace(
+        _client({"batches": [gateway, engine, other]}),
+        "http://tempo",
+        42,
+        _TRACE,
+        _REQUEST,
+    )
+
+    assert detail.request.instance_id == 8
+    assert detail.request.instance_name == "removed-8"
+
+
+def _candidate(trace_number, started):
+    return {
+        "traceID": f"{trace_number:032x}",
+        "startTimeUnixNano": str(started),
+        "spanSets": [
+            {
+                "spans": [
+                    {
+                        "spanID": "0000000000000001",
+                        "name": "POST inference proxy",
+                        "startTimeUnixNano": str(started),
+                        "durationNanos": str(_NS),
+                        "attributes": _attributes(
+                            **{
+                                "service.name": "gpustack.worker",
+                                "gpustack.model_id": 42,
+                                "http.response.status_code": 200,
+                            }
+                        ),
+                    }
+                ]
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_pages_preserve_traces_in_the_boundary_second():
+    candidates = [_candidate(i, 102 * _NS + 10_000 * i) for i in range(101, 0, -1)]
+    candidates.append(_candidate(102, 101 * _NS))
+    position = TracePagePosition(start=1, end=200, before=200)
+    seen = []
+    for _ in range(11):
+        client = _client(
+            {
+                "traces": [
+                    trace
+                    for trace in candidates
+                    if trace["traceID"] not in position.seen
+                    and int(trace["startTimeUnixNano"]) < position.before * _NS
+                ][:100]
+            }
+        )
+        page = await search_request_trace_page(
+            client,
+            "http://tempo",
+            42,
+            position=position,
+            page_size=10,
+            identifier=None,
+            outcome="success",
+            instance_id=None,
+            no_engine=False,
+        )
+        seen.extend(row.trace_id for row in page.items)
+        if not page.next_cursor:
+            break
+        position = TracePagePosition.model_validate_json(
+            base64.urlsafe_b64decode(page.next_cursor)
+        )
+        assert position.end == 200
+        assert position.before == 103
+
+    expected = [f"{i:032x}" for i in range(101, 0, -1)] + [f"{102:032x}"]
+    assert seen == expected
