@@ -135,6 +135,7 @@ class RequestTraceSpan(BaseModel):
     status: str
     engine: Optional[RequestEngineMetrics] = None
     reported_service: Optional[str] = None
+    phase: Optional[Literal["prefill", "decode"]] = None
 
 
 class RequestTraceDetail(BaseModel):
@@ -256,6 +257,11 @@ def _detail_spans(data: dict) -> List[_Span]:
         for scope in batch.get("scopeSpans", []):
             for item in scope.get("spans", []):
                 start = int(item["startTimeUnixNano"])
+                status = (
+                    str(item.get("status", {}).get("code", "unset"))
+                    .lower()
+                    .removeprefix("status_code_")
+                )
                 spans.append(
                     _Span(
                         id=_span_id(item["spanId"]) or "",
@@ -264,9 +270,9 @@ def _detail_spans(data: dict) -> List[_Span]:
                         service=service,
                         start=start,
                         duration=max(0, int(item["endTimeUnixNano"]) - start),
-                        status=str(item.get("status", {}).get("code", "unset"))
-                        .lower()
-                        .removeprefix("status_code_"),
+                        status={"0": "unset", "1": "ok", "2": "error"}.get(
+                            status, status
+                        ),
                         attrs={
                             **_attributes(item.get("attributes", [])),
                             **{
@@ -710,7 +716,7 @@ async def search_request_trace_page(
         raise ServiceUnavailableException("Trace query returned invalid data") from None
 
 
-def _display_span(span: _Span, start: int) -> RequestTraceSpan:
+def _display_span(span: _Span, start: int, parent: Optional[_Span]) -> RequestTraceSpan:
     role: Literal["gateway", "proxy", "engine", "other"] = "other"
     if span.service == _GATEWAY:
         role = "gateway"
@@ -718,6 +724,12 @@ def _display_span(span: _Span, start: int) -> RequestTraceSpan:
         role = "proxy"
     elif span.is_engine:
         role = "engine"
+    phase_span = parent if role == "engine" else span
+    phase = (
+        phase_span.attrs.get("vllm.request_phase")
+        if phase_span and phase_span.service == "vllm-router"
+        else None
+    )
     return RequestTraceSpan(
         id=span.id,
         parent_id=span.parent_id,
@@ -729,6 +741,7 @@ def _display_span(span: _Span, start: int) -> RequestTraceSpan:
         status=span.status,
         engine=_span_engine_metrics(span),
         reported_service=span.reported_service,
+        phase=phase if phase in ("prefill", "decode") else None,
     )
 
 
@@ -748,10 +761,12 @@ async def get_request_trace(
             if request_id and row.request_id != request_id:
                 continue
             start = spans[0].start
+            by_id = {span.id: span for span in spans}
             return RequestTraceDetail(
                 request=row,
                 spans=[
-                    _display_span(span, start) for span in spans[:_MAX_DETAIL_SPANS]
+                    _display_span(span, start, by_id.get(span.parent_id or ""))
+                    for span in spans[:_MAX_DETAIL_SPANS]
                 ],
                 span_count=len(spans),
             )

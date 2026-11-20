@@ -146,6 +146,60 @@ async def test_detail_follows_only_the_selected_request_branch():
 
 
 @pytest.mark.asyncio
+async def test_detail_exposes_pd_phases_and_explicit_span_errors():
+    entry = _span(
+        "gpustack.worker",
+        1,
+        None,
+        "POST inference proxy",
+        100,
+        10,
+        **{"gpustack.model_id": 42, "gpustack.request_id": _REQUEST},
+    )
+    router = _span("vllm-router", 2, 1, "POST /v1/chat/completions", 100, 10)
+    batches = [entry, router]
+    for dispatch_id, phase in [(3, "prefill"), (5, "decode"), (7, "unknown")]:
+        dispatch = _span(
+            "vllm-router",
+            dispatch_id,
+            2,
+            "POST /v1/chat/completions",
+            101,
+            4,
+            **{"vllm.request_phase": phase},
+        )
+        engine = _span("vllm", dispatch_id + 1, dispatch_id, "llm_request", 102, 3)
+        if phase == "decode":
+            engine["scopeSpans"][0]["spans"][0]["status"] = {"code": 2}
+        batches.extend([engine, dispatch])
+    batches.append(
+        _span(
+            "custom",
+            9,
+            2,
+            "custom-call",
+            101,
+            1,
+            **{"vllm.request_phase": "decode"},
+        )
+    )
+
+    detail = await get_request_trace(
+        _client({"batches": batches}), "http://tempo", 42, _TRACE, _REQUEST
+    )
+
+    spans = {int(span.id, 16): span for span in detail.spans}
+    assert {i: span.phase for i, span in spans.items() if span.phase} == {
+        3: "prefill",
+        4: "prefill",
+        5: "decode",
+        6: "decode",
+    }
+    assert spans[6].status == "error"
+    assert spans[4].status == "unset"
+
+
+@pytest.mark.asyncio
 async def test_search_projects_request_data_with_one_bounded_query():
     root = {
         "spanID": "0000000000000001",
