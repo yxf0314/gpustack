@@ -14,7 +14,7 @@ from gpustack.cloud_providers.abstract import CloudInstance, InstanceState, Volu
 
 
 @pytest.mark.asyncio
-async def test_provisioning_flow(monkeypatch):
+async def test_provisioning_flow(monkeypatch, caplog):
     session = AsyncMock()
     session.info = {}
     client = AsyncMock()
@@ -74,8 +74,9 @@ async def test_provisioning_flow(monkeypatch):
 
     client.get_instance = AsyncMock(return_value=mock_instance)
     client.create_ssh_key = AsyncMock(return_value="ssh-key-id")
+    user_data = "#cloud-config\nregistration_token: test-registration-token\n"
     mock_user_data = MagicMock()
-    mock_user_data.format.return_value = "#!/bin/bash\necho hello"
+    mock_user_data.format.return_value = user_data
     client.construct_user_data = AsyncMock(return_value=mock_user_data)
     client.create_instance = AsyncMock(return_value="instance-id")
     client.wait_for_started = AsyncMock(return_value={"id": "instance-id"})
@@ -99,11 +100,17 @@ async def test_provisioning_flow(monkeypatch):
     assert worker.ssh_key_id == "ssh-key-id"
     assert worker.state_message == "Creating cloud instance"
     # Third call, should enter the cloud instance creation process
-    await WorkerProvisioningController._provisioning_instance(
-        session, client, worker, cfg
-    )
+    with caplog.at_level("DEBUG", logger="gpustack.server.controllers"):
+        await WorkerProvisioningController._provisioning_instance(
+            session, client, worker, cfg
+        )
     assert worker.external_id == "instance-id"
     assert worker.state_message == "Waiting for cloud instance started"
+    assert "Cloud instance configuration: CloudInstanceCreate(name='test-worker'" in (
+        caplog.text
+    )
+    assert "test-registration-token" not in caplog.text
+    assert client.create_instance.await_args.args[0].user_data == user_data
     # Fourth call, should wait for cloud instance to start
     client.wait_for_started.return_value = {"id": "instance-id"}
     await WorkerProvisioningController._provisioning_instance(
