@@ -128,6 +128,8 @@ GPUSTACK_TRACE_OTLP_ENDPOINT='<collector-host>:4317'
 
 Pass them with `docker run -e` or under `environment` in your Compose file. The log endpoint is the full OTLP/HTTP URL. The trace endpoint is an OTLP/gRPC `host:port` without a URL scheme.
 
+You can also pass `--log-otlp-endpoint` and `--trace-otlp-endpoint` after the Docker image name. See the [`gpustack start` reference](../cli-reference/start.md#common-options).
+
 The built-in Tempo runs in the Server container and stores data in the `tempo` subdirectory of the GPUStack data directory. Trace persistence follows the Server data mount. You can also mount the `tempo` subdirectory on a separate volume to control its disk usage. Retention limits the age of stored traces. Disk usage also depends on request volume and the number of spans per request.
 
 Tempo's ingest, query, and internal gRPC ports default to 4317, 3200, and 9095. If another process occupies one of these ports, the Server continues starting while s6 retries Tempo on the same ports after a five-second delay. Trace producers continue sending to their configured address during the wait. If an existing OTLP receiver is listening there, it can receive those spans. To configure different ports, set `GPUSTACK_BUILTIN_TEMPO_OTLP_PORT`, `GPUSTACK_BUILTIN_TEMPO_HTTP_PORT`, or `GPUSTACK_BUILTIN_TEMPO_GRPC_PORT`. The query and internal gRPC ports bind to loopback. In Docker bridge mode, a conflict on a published host port must be resolved before Docker can start the container.
@@ -140,7 +142,7 @@ For an HTTPS log endpoint, set `GPUSTACK_LOG_OTLP_AUTHORIZATION` to the full aut
 
 ### Configure Helm
 
-Add the desired endpoints to the values of each GPUStack release.
+Configure the endpoints in the Helm values of each GPUStack release. The chart uses these values to configure the Server, Workers, bundled gateway, and log collector together.
 
 ```yaml
 logging:
@@ -163,6 +165,27 @@ If you manage Higress separately, configure tracing in that gateway and propagat
 
     Recreate Docker containers or apply the updated Helm release after changing the endpoints. Restart or redeploy already-running model instances so their engine and PD Router launch settings can take effect.
 
+### Redact Exported Logs
+
+Alloy can replace matches in the log body, exception stack trace, and `path` with `***` before exporting logs. Rules use RE2 regular expressions and default to an empty list. Request, trace, and span IDs remain available for correlation.
+
+For Docker, pass `GPUSTACK_LOG_REDACT_PATTERNS` as a JSON array of strings on each container that exports logs. This example masks email addresses and mainland Chinese mobile numbers:
+
+```bash
+GPUSTACK_LOG_REDACT_PATTERNS='["(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+[.][A-Z]{2,}","\\b1[3-9][0-9]{9}\\b"]'
+```
+
+For Helm, set the equivalent YAML list in each release that exports logs:
+
+```yaml
+logging:
+  redactPatterns:
+    - '(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+[.][A-Z]{2,}'
+    - '\b1[3-9][0-9]{9}\b'
+```
+
+Recreate the Docker containers or upgrade the Helm release to apply the rules. Check the exported records in your log backend by `request_id`. The rules affect new exports from the GPUStack-managed Alloy. Original records remain available through `docker logs`, `kubectl logs`, or the runtime's log files. Previously exported records and traces are outside these rules. Invalid rules can prevent Alloy from exporting logs while GPUStack continues serving requests.
+
 ### Look Up a Request
 
 1. Send a request to a running chat model and keep the response headers. Replace `<gpustack-host>`, `<api-key>`, and `<model-name>` with your deployment values. See [API Key Management](api-key-management.md) for inference permissions.
@@ -180,6 +203,20 @@ If you manage Higress separately, configure tracing in that gateway and propagat
 
 2. In your log backend, set the time range around the request and filter on the `request_id` log attribute. Use the OTLP resource attribute `service.name` to select a source such as `higress`, `gpustack.server`, or `gpustack.engine`. Where present, `worker_id`, `model_instance_id`, and `role` can narrow the results.
 3. If a log record carries an OTLP trace ID, use that ID to retrieve the trace from your trace backend. With tracing enabled, you can also search for the platform request ID using the `gpustack.request_id` span attribute, including when log export is off.
+
+### Example with Loki and Grafana
+
+1. For a Loki deployment with [OTLP ingestion and structured metadata enabled](https://grafana.com/docs/loki/latest/send-data/otel/), set `GPUSTACK_LOG_OTLP_ENDPOINT` or `logging.endpoint` to its full ingest URL, such as `http://<loki-host>:3100/otlp/v1/logs`. For traces, configure `GPUSTACK_TRACE_OTLP_ENDPOINT` or `tracing.endpoint` with a Tempo OTLP/gRPC address reachable by the span producers. Configure Grafana data sources with the Loki and Tempo HTTP query URLs.
+2. In Grafana `Explore`, select Loki, set the request's time range, and replace `<request-id>` with the `X-GPUStack-Request-Id` response header value. With Loki's default OTLP mapping, `service.name` becomes the `service_name` stream label, and `request_id` is structured metadata.
+
+   ```logql
+   {service_name=~"higress|gpustack[.](server|worker|engine)"} | request_id="<request-id>"
+   ```
+
+   To narrow the results, append `| worker_id="<worker-id>"` or `| model_instance_id="<instance-id>"` for records that carry those fields.
+3. If a result carries `trace_id`, copy it into the Tempo data source's `TraceQL` query field. To open the trace directly from a log result, configure a Loki [derived field](https://grafana.com/docs/grafana/latest/datasources/loki/configure/#derived-fields) of type `Label` matching `^trace_id$`, with an internal link to the Tempo data source and `${__value.raw}` as the query.
+
+Manage retention and access in the external platform. If tenant users can query the data, enforce tenant isolation there.
 
 ### Investigate PD Requests
 
